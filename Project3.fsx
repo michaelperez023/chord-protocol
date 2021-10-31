@@ -10,22 +10,27 @@ open System.Security.Cryptography
 let system = ActorSystem.Create("System")
 let timer = System.Diagnostics.Stopwatch()
 let r = System.Random()
-let m = int (ceil (Math.Log(float Int32.MaxValue, 10.0) / Math.Log(2.0, 10.0))) - 1
-let totalSpace = int64 (2.0**(float m))
 
 type Message =
     | Start
-    | Join of IActorRef
-    | NodeAddComplete
+    | Join of int*IActorRef
+    | UpdateFingerTable of Map<int, IActorRef>*Map<int,int>
+    | UpdateSuccessors
+    | RequestFingerTables of IActorRef
+    | NodeAddComplete of int
+    | SetRequests of int
+    | SetFingerTable of Map<int,IActorRef>*Map<int,int>
+    | StartRequesting
+    | SendRequest
+    | Request of IActorRef*int
+    | Receipt
+    | RequestFwd of int*IActorRef*int
 
 let ranStr n = 
     let r = Random()
     let chars = Array.concat([[|'a' .. 'z'|];[|'A' .. 'Z'|];[|'0' .. '9'|]])
     let sz = Array.length chars in
     String(Array.init n (fun _ -> chars.[r.Next sz]))
-
-//let bytesToHex : byte[] -> String =
-//    fun bytes -> bytes |> Array.fold (fun a x -> a + x.ToString("x2")) ""
 
 let getHash inputStr M : int =
     let hashBytes = Encoding.UTF8.GetBytes(inputStr |> string) |> (new SHA256Managed()).ComputeHash
@@ -45,118 +50,176 @@ let getRandomHash M : int =
 
 let toList s = Set.fold (fun l se -> se::l) [] s
 
-(*let getHash id totalSpace =
-    printfn "id: %s" id
-    let mutable hash = (0 |> int64)
-    if not (String.IsNullOrEmpsty(id)) then
-        let mutable key = Encoding.UTF8.GetBytes(id) |> (new SHA256Managed()).ComputeHash |> bytesToHex
-        //var key = MessageDigest.getInstance("SHA-256").digest(id.getBytes("UTF-8")).map("%02X" format _).mkString.trim()
-        if key.Length > 15 then
-            key <- key.Substring(key.Length - 15)
-        printfn "key: %s" key
-        hash <- (key |> int64) % totalSpace
-    hash*)
+let NodeActor bossNode requests nodes selfID n (mailbox:Actor<_>) =
+    let self = mailbox.Self
+    let mutable fingerTable = Map.empty<int, IActorRef>
+    let mutable fingerPeerID = Map.empty<int, int>
+    let mutable requests = -1
+    let mutable totalHops = 0
+    let mutable messages = 0
+    let mutable cancelRequesting = false
+    let totalNodes = nodes
 
-type Interval(s:int, e:int, m:int) =
-    static let determineZeroCrossOver (st:int) (en:int) =
-        if st > en then true else false
-    member this.StartInterval = s
-    member this.EndInterval = e
-    member this.M = m
-    member this.ringLimit = int(2.0**(double m))
-    member this.zeroCrossOver = determineZeroCrossOver s e
+    let canReplace (peerID: int) = 
+        let mutable distance = 0
+        if(selfID < peerID) then
+            distance <- peerID - selfID
+        else
+            distance <- selfID + int(2. ** 4.) - peerID
 
-    member this.contains (i:int) : bool =
-        let mutable inRange = false
-        if ((i >= this.StartInterval) && (i < this.EndInterval)) then
-            inRange <- true
-        else if this.zeroCrossOver && ((i >= this.StartInterval && i < this.ringLimit) || (i >= 0 && i < this.EndInterval)) then
-            inRange <- true
-        inRange
+        let mutable closest = int(2. ** (Math.Log2(float distance)/Math.Log2(2.)))
+        closest <- (closest + selfID) % n
+        match fingerPeerID.TryFind(closest) with
+            | Some x ->
+                if x = -1 then
+                    true
+                else
+                    (fingerPeerID.[closest] >= peerID)
+            | None -> true
 
-type FingerTableEntry(s:int, interval:Interval, actorRef:IActorRef) =
-    member this.toString : String =
-        actorRef.ToString()
-
-let NodeActor index M (mailbox:Actor<_>) =
-    let sizeLimit = int (2.0**(double M))
-    let mutable fingerTable : FingerTableEntry array = Array.zeroCreate M
-
-    for i in 0..M-1 do
-        let start = int (index + int(2.0**(double i))) % sizeLimit
-        let interval = new Interval(start, ((start + int (2.0**(double i))) % sizeLimit), M)
-        fingerTable.[i] <- new FingerTableEntry(start, interval, mailbox.Self)
-
-    let mutable nodeIDs = Set.empty
     let rec loop () = actor {
         let! message = mailbox.Receive()
         let sender = mailbox.Sender()
 
         match message with
-        | Join(networkNode) ->  if networkNode = null then
-                                    printfn "network node is null"
-                                else
-                                    printfn "network node is not null"
-                                sender <! NodeAddComplete
+        | SetFingerTable(x, y) ->   fingerTable <- x
+                                    fingerPeerID <- y
+        | Join(peerID,peer) ->  printfn "Peer %i has joined the ring" peerID
+                                fingerTable |> Map.iter (fun _key _value ->
+                                    if canReplace peerID then
+                                        fingerTable <- fingerTable |> Map.add _key peer
+                                        fingerPeerID <- fingerPeerID |> Map.add _key peerID
+                                )
+                                fingerTable <- fingerTable |> Map.add peerID peer
+                                peer <! UpdateFingerTable(fingerTable, fingerPeerID)
+        | UpdateFingerTable(x, y) ->    //Function that takes an incoming PeerTable and matches it with the current peer table and updates values
+                                        printfn "Peer %i is updating its fingerTable" selfID
+                                        let mutable updateSuccessorRequest = false
+                                        fingerPeerID |> Map.iter (fun key' value' ->
+                                            let mutable lowestValue =
+                                                if value' = -1 then
+                                                    int (2. ** float n)
+                                                else
+                                                    value'
+                                            let mutable leastKey = int (2. ** float n)        
+                                            y |> Map.iter (fun _key _value ->
+                                                if _value < lowestValue && _value >= key' then
+                                                    lowestValue <- _value
+                                                    leastKey <- _key
+                                            )
+                                            if leastKey <> (int (2. ** float n)) then
+                                                fingerPeerID <- fingerPeerID |> Map.add key' lowestValue
+                                                fingerTable <- fingerTable |> Map.add key' x.[leastKey]
+                                                updateSuccessorRequest <- true
+                                        )
+                                        if updateSuccessorRequest then
+                                            self <! UpdateSuccessors
+        | UpdateSuccessors ->   fingerTable |> Map.iter (fun key_ value_ ->
+                                if not (isNull value_) then
+                                    value_ <! RequestFingerTables(self)
+                                )
+        | RequestFingerTables x -> x <! UpdateFingerTable(fingerTable, fingerPeerID)
+        | StartRequesting -> //Starts Scheduler to schedule SendRequest Message to self mailbox
+                             system.Scheduler.ScheduleTellRepeatedly(TimeSpan.FromSeconds(1.), TimeSpan.FromSeconds(1.), self, SendRequest)
+                             self <! SendRequest
+        | SendRequest ->    //Send a request for a random peer over here
+                            let randomPeer = r.Next(totalNodes)
+                            
+                            printfn "random peer: %i" randomPeer
+                            match fingerTable.TryFind(randomPeer) with
+                                | Some x -> printfn "some"
+                                            x <! Request(self, 1)
+                                | None -> printfn "none"
+                                            //let mutable closest = -1
+                                            //fingerTable |> Map.iter (fun _key _value -> if (_key < randomPeer || _key > closest) then closest <- _key)
+                                            //fingerTable.[closest] <! RequestFwd(randomPeer, self, 1)*)
+        | Request(actor,hops) ->    printfn "requesting!!!"
+                                    totalHops <- totalHops + hops
+                                   //actor <! Receipt
+        | Receipt ->    messages <- messages + 1
+                        if messages = requests then
+                            cancelRequesting <- true
+                            bossNode <! NodeAddComplete(totalHops)
+                        printfn "message received at designated peer"
+        | RequestFwd(reqID, requestingPeer, hops) -> match fingerTable.TryFind(reqID) with
+                                                        | Some actor -> actor <! Request(requestingPeer, hops + 1)
+                                                        | None ->   let mutable closest = -1
+                                                                    fingerTable |> Map.iter (fun _key _value -> if (_key < reqID || _key > closest) then closest <- _key)
+                                                                    fingerTable.[closest] <! RequestFwd(reqID, requestingPeer, hops + 1)
         | _ -> ()
         return! loop ()
     }
     loop ()
 
-let BossActor numNodes numRequests (mailbox:Actor<_>) =
-    let mutable nodeIDs = Set.empty
+let BossActor nodes (mailbox:Actor<_>) =
+    let mutable totalNodes = nodes
+    let mutable totalHops = 0
     let mutable addedNodes = 0
-    let mutable nodeIDsList = List.empty
+    let mutable requests = 0
+
     let rec loop () = actor {
         let! message = mailbox.Receive()
         let sender = mailbox.Sender()
 
         match message with
-        | Start ->  printfn "random hash 1 %i" (getRandomHash(30))
-                    nodeIDs <- nodeIDs.Add(getRandomHash(30))
-                    let mutable randInt = 0
-                    randInt <- getRandomHash(30)
-                    while (nodeIDs.Count < numNodes) do
-                        if nodeIDs.Contains(randInt) then
-                            randInt <- getRandomHash(30)
-                        else
-                            nodeIDs <- nodeIDs.Add(randInt)
-                    nodeIDsList <- toList nodeIDs
-                    let node1Name = nodeIDsList.[0]
-                    printfn "spawning node %i" node1Name
-
-                    let node1 = NodeActor node1Name 30 |> spawn system ("Node" + string(node1Name))
-                    node1 <! Join(null)
-                    printfn "node 1 joining"
-        | NodeAddComplete ->    addedNodes <- addedNodes + 1
-                                printfn "node add complete"
-
-                                if addedNodes <> numNodes then
-                                    let nodeId = nodeIDsList.[addedNodes]
-                                    let node = NodeActor nodeId 30 |> spawn system ("Node" + string(nodeId))
-                                    node <! Join(null)
-                                else
-                                    printfn "All nodes added"
+        | NodeAddComplete hops ->   addedNodes <- addedNodes + 1
+                                    totalHops <- totalHops + hops
+                                    
+                                    if (addedNodes = totalHops) then
+                                        printfn "All the nodes have completed the number of requests to be made with %f average hops" (float(totalHops)/float(requests*totalNodes))
+                                        Environment.Exit(-1)
+        | SetRequests requests_ ->    requests <- requests_
         | _ -> ()
         return! loop ()
     }
     loop ()
+
+let nearestPower n =
+    if ((n > 0) && (n &&& (n-1) = 0)) then
+        n
+    else
+        let mutable count = 0
+        let mutable x = n
+        while (x <> 0) do
+            x <- x >>> 1
+            count <- count + 1
+        count
 
 match fsi.CommandLineArgs.Length with
 | 3 ->
-    let numNodes = fsi.CommandLineArgs.[1] |> int
-    let numRequests = fsi.CommandLineArgs.[2] |> int
+    let mutable numNodes = 5//let numNodes = fsi.CommandLineArgs.[1] |> int
+    let numRequests = 10//let numRequests = fsi.CommandLineArgs.[2] |> int
 
     //timer.Start()
 
-    let bossNode = spawn system "boss" (BossActor numNodes numRequests)
-    
-    bossNode <! Start
+    let bossNode = spawn system "boss" (BossActor numNodes)
 
-    //for i in [0..numNodes-1] do
-    //    if i = 0 then
-     //       let node1 = getHash ("Node - " + (i |> string)) totalSpace
-     //       printfn "Initializing the first peer with hash Id %i" node1
+    printfn "num nodes: %i" numNodes
+    let nearestPow = nearestPower numNodes
+    let ringCapacity = int (2.**float nearestPow)
+
+    printfn "Nearest Power: %i, Ring Capacity: %i" nearestPow ringCapacity
+    
+    bossNode <! SetRequests(numRequests)
+
+    let nodes = [|for i in [0..numNodes-1] -> NodeActor bossNode numRequests numNodes i nearestPow |> spawn system ("Node" + string(i))|]
+
+    for i in [0 .. numNodes-1] do
+        let mutable fingers = Map.empty<int, IActorRef>
+        let mutable peerIDTable = Map.empty<int, int>
+        fingers <- fingers |> Map.add i nodes.[i]
+        for j in [0 .. nearestPow - 1] do
+            let x = i + int (2. ** float j) % int (2.** float nearestPow)
+            fingers <- fingers |> Map.add x null
+            peerIDTable <- peerIDTable |> Map.add x -1
+        nodes.[i] <! SetFingerTable(fingers, peerIDTable)
+
+    let baseActor = nodes.[0]
+    for i in [1 .. numNodes-1] do
+        baseActor <! Join(i, nodes.[i])
+    
+    //for i in [0 .. numNodes-1] do
+    nodes.[0] <! StartRequesting
 
     system.WhenTerminated.Wait()
     ()
