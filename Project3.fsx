@@ -2,18 +2,14 @@
 #r "nuget: Akka.FSharp"
 
 open System
-open System.IO
 open Akka.Actor
 open Akka.FSharp
-open System.Text
 open System.Security.Cryptography
 open System.Collections.Generic
 
 let system = ActorSystem.Create("System")
-let timer = System.Diagnostics.Stopwatch()
 let r = System.Random()
 let m = int (ceil (Math.Log(float Int32.MaxValue, 10.0) / Math.Log(2.0, 10.0))) - 1
-let totalSpace = int64 (2.0**(float m))
 let nodeDict = new Dictionary<bigint, IActorRef>()
 
 type Message =
@@ -23,26 +19,16 @@ type Message =
     | Initialize of bigint * int * List<bigint> * bigint * bigint * int * List<bigint>
     | Update of bigint * int * int
     | Join of bigint
-    | NodeAddComplete
     | Stabilize
     | StabilizeAskSuccessor of bigint
     | StabilizeSuccessorSendPredecessor of bigint
     | StabilizeNotify of bigint
-    | FindKey of int * int
     | FindPredecessor of int * int
     | FindResult of int * IActorRef * int
     | FixFingerTable
     | CheckPredecessor
-    | Notify of IActorRef
-    | GetPredecessor
-    | PrintInfo
-    | RandomQuery
-    | StartRequests of int
-    | AllRequestsSent
-    | RequestHopCount of int
-    | GetPredecessorResult of IActorRef
     | RequestMessage of string * bigint * bigint * int
-    | RequestReachedDestination of int * string * bigint
+    | RequestReachedDestination of int
     | FindSuccessorMessage of bigint
     | SuccessorFoundMessage of bigint * bigint * List<bigint>
     | FixFingerTableRequest of bigint * bigint
@@ -57,8 +43,6 @@ let ranStr n =
     String(Array.init n (fun _ -> chars.[r.Next sz]))
 
 let stringToByte(str: string) = System.Text.Encoding.ASCII.GetBytes(str);
-
-let toList s = Set.fold (fun l se -> se::l) [] s
 
 let decideDestination (hash':bigint, id':bigint, predecessor':bigint, successor':bigint, fingerTable':List<bigint>, successorList':List<bigint>) = 
     let mutable destination = id'
@@ -84,7 +68,6 @@ let decideDestination (hash':bigint, id':bigint, predecessor':bigint, successor'
     destination
 
 let NodeActor (mailbox:Actor<_>) =
-    //let sizeLimit = int (2.0**(double m))
     let mutable numRequestsSent = 0
     let mutable numRequests = 0
     let mutable messagesReceived = 0
@@ -132,10 +115,10 @@ let NodeActor (mailbox:Actor<_>) =
             let destination = decideDestination (hash', id, predecessor, successor, fingerTable, successorList)
             let newHops = hops' + 1
             if destination = id then
-                nodeDict.Item(id') <! RequestReachedDestination(newHops, message', hash')
+                nodeDict.Item(id') <! RequestReachedDestination(newHops)
             else
                 nodeDict.Item(destination) <! RequestMessage(message', hash', id', newHops)
-        | RequestReachedDestination(hops', message', hash') ->
+        | RequestReachedDestination(hops') ->
             messagesReceived <- messagesReceived + 1
             numHops <- numHops + hops'
             if messagesReceived = numRequests then
@@ -155,7 +138,7 @@ let NodeActor (mailbox:Actor<_>) =
                 successorList.RemoveAt(successorList.Count - 1)
             nodeDict.Item(successor) <! StabilizeNotify(nodeID)
         | StabilizeNotify(nodeID) -> predecessor <- nodeID
-        | Join(rNode) ->    nodeDict.Item(rNode) <! FindSuccessorMessage(id)
+        //| Join(rNode) ->    nodeDict.Item(rNode) <! FindSuccessorMessage(id)
         | FindSuccessorMessage(node) -> 
             let destination = decideDestination (node, id, predecessor, successor, fingerTable, successorList)
             if destination = id && predecessor <> bigint(-1) then
@@ -198,8 +181,8 @@ let NodeActor (mailbox:Actor<_>) =
                 if predecessorExists then
                     nodeDict.Item(predecessor) <! SuccessorCheckingPredecessor
                     predecessorExists <- false
-                else
-                    predecessor <- bigint(-1)
+                //else
+                //    predecessor <- bigint(-1)
         | PredecessorReply -> printfn "PredecessorReply"
                               predecessorExists <- true
         | SuccessorCheckingPredecessor ->   printfn "PredecessorReply"
@@ -342,7 +325,6 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
             for i in (numNodes+1)..(numNodes+numNodesLeft) do
                 let mutable rNode = nodeIdListNew.Item(r.Next(nodeIdList.Count - 1))
                 nodeDict.Item(nodeIdDict.Item(i)) <! Join(rNode)
-
         | Complete(hops, node) -> // Node completion check
             // The completed node will increment the counter for total completed nodes
             completedNodes <- completedNodes + 1
