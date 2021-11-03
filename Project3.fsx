@@ -105,9 +105,12 @@ let NodeActor (mailbox:Actor<_>) =
                 let hash = abs(bigint(stringToByte(randomText) |> HashAlgorithm.Create("SHA1").ComputeHash)) % bigint(Math.Pow(2.0, float(m)))
                 let destination = decideDestination (hash, id, predecessor, successor, fingerTable, successorList)
                 nodeDict.Item(destination) <! RequestMessage(randomText, hash, id, 0)
-                //numRequestsSent <- numRequestsSent + 1
+                //---Broken line
+                numRequestsSent <- numRequestsSent + 1
+                printfn "%A" numRequestsSent
                 system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(1.), mailbox.Self, NodeStart)
-            if numRequestsSent = 1 then
+            // Temporary fix
+            else //if numRequestsSent = 1 then
                 system.Scheduler.ScheduleTellOnce(TimeSpan.FromMilliseconds(20.), mailbox.Self, Stabilize)
                 system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(1.), mailbox.Self, FixFingerTable)
                 system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(0.5), mailbox.Self, CheckPredecessor)
@@ -185,10 +188,12 @@ let NodeActor (mailbox:Actor<_>) =
                     predecessorExists <- false
                 else
                     predecessor <- bigint(-1)
-        | PredecessorReply -> printfn "PredecessorReply"
-                              predecessorExists <- true
-        | SuccessorCheckingPredecessor ->   printfn "PredecessorReply"
-                                            nodeDict.Item(successor) <! PredecessorReply
+        | SuccessorCheckingPredecessor ->   
+            printfn "PredecessorReply"
+            nodeDict.Item(successor) <! PredecessorReply
+        | PredecessorReply -> 
+            printfn "PredecessorReply"
+            predecessorExists <- true
         | _ -> ()
         return! loop ()
     }
