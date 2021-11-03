@@ -9,7 +9,6 @@ open System.Collections.Generic
 
 let system = ActorSystem.Create("System")
 let r = System.Random()
-let m = int (ceil (Math.Log(float Int32.MaxValue, 10.0) / Math.Log(2.0, 10.0))) - 1
 let nodeDict = new Dictionary<bigint, IActorRef>()
 
 type Message =
@@ -93,12 +92,12 @@ let NodeActor (mailbox:Actor<_>) =
     let mutable boss = mailbox.Self
 
     let rec loop () = actor {
+        mailbox.Context.SetReceiveTimeout(TimeSpan.FromSeconds 1000.0)
         let! message = mailbox.Receive()
         if boss = mailbox.Self then
             boss <- mailbox.Sender()
 
         match message with
-        // Initializ all the values for the variables based off the data generated from the boss node
         | Initialize(id', m', fingerTable', predecessor', successor', numRequests', successorList') -> 
             id <- id'
             m <- m'
@@ -107,83 +106,69 @@ let NodeActor (mailbox:Actor<_>) =
             successor <- successor'
             numRequests <- numRequests'
             successorList <- successorList'
-        // Update the new values for the ID, the number of requests, and the bytesize
         | Update(id', m', numRequests') -> 
             id <- id'
             m <- m'
             numRequests <- numRequests'
-        // Start the node!
         | NodeStart -> 
-            // Check to see if the number of requets we already sent is still less than the total we want to send
             if numRequestsSent < numRequests then
+
                 // Generate random text from some random string
                 let mutable randomText = ranStr 5
-
                 let hash = abs(bigint(stringToByte(randomText) |> HashAlgorithm.Create("SHA1").ComputeHash)) % bigint(Math.Pow(2.0, float(m)))
-                let destination = decideDestination (hash, id, predecessor, successor, fingerTable, successorList)
+                let destination = decideDestination(hash, id, predecessor, successor, fingerTable, successorList)
                 nodeDict.Item(destination) <! RequestMessage(randomText, hash, id, 0)
                 //---Broken line
                 numRequestsSent <- numRequestsSent + 1
-                printfn "%A" numRequestsSent
+                //printfn "%A" numRequestsSent
                 system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(1.), mailbox.Self, NodeStart)
+
             // Temporary fix // else
             if numRequestsSent = 1 then
                 // Start the system scheduler to stabilize, fix the finger table, and check for a predecessor
                 system.Scheduler.ScheduleTellOnce(TimeSpan.FromMilliseconds(20.), mailbox.Self, Stabilize)
                 system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(1.), mailbox.Self, FixFingerTable)
                 system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(0.5), mailbox.Self, CheckPredecessor)
-        // Request to join the network
         | RequestMessage(message', hash', id', hops') -> 
-            //Decide destination, augment the hops, and state that the destination has been reaches as long as the id matches the destination
-            // Else request again with new hops until the proper item is hit
-            let destination = decideDestination (hash', id, predecessor, successor, fingerTable, successorList)
+            let destination = decideDestination(hash', id, predecessor, successor, fingerTable, successorList)
             let newHops = hops' + 1
             if destination = id then
                 nodeDict.Item(id') <! RequestReachedDestination(newHops)
             else
                 nodeDict.Item(destination) <! RequestMessage(message', hash', id', newHops)
         | RequestReachedDestination(hops') ->
-            // Augment messages received and the number of hops
             messagesReceived <- messagesReceived + 1
             numHops <- numHops + hops'
-
-            // If a message has been recieved the same amount of times requests have been received then we are done
             if messagesReceived = numRequests then
                 boss <! Complete(numHops, id)
-        // Stabilize the chord
         | Stabilize -> 
-            // Check that successor exists
             if successor <> bigint(-1) then
                 nodeDict.Item(successor) <! StabilizeAskSuccessor(id)
                 system.Scheduler.ScheduleTellOnce(TimeSpan.FromMilliseconds(10.0), mailbox.Self, Stabilize)
         | StabilizeAskSuccessor(nodeID) ->
-            // check that predecessor exists
             if predecessor <> bigint(-1) then
                 nodeDict.Item(nodeID) <! StabilizeSuccessorSendPredecessor(predecessor)
         | StabilizeSuccessorSendPredecessor(nodeID) ->
-            // If the id is not the same as the nodeID then we need to stabilize, else we can add to the chord again
             if id <> nodeID then
                 successor <- nodeID
                 successorList.Add(nodeID)
                 successorList.Sort()
                 successorList.RemoveAt(successorList.Count - 1)
             nodeDict.Item(successor) <! StabilizeNotify(nodeID)
-        | StabilizeNotify(nodeID) -> 
-            predecessor <- nodeID
-        | Join(rNode) ->
-            nodeDict.Item(rNode) <! FindSuccessorMessage(id)
+        | StabilizeNotify(nodeID) -> predecessor <- nodeID
+        | Join(rNode) ->    nodeDict.Item(rNode) <! FindSuccessorMessage(id)
         | FindSuccessorMessage(node) -> 
             //printfn "FindSuccessorMessage"
-            let destination = decideDestination (node, id, predecessor, successor, fingerTable, successorList)
+            let destination = decideDestination(node, id, predecessor, successor, fingerTable, successorList)
             //printfn "destination: %A" destination
             if destination = id && predecessor <> bigint(-1) then
-                //nodeDict.Item(node) <! SuccessorFoundMessage(id, predecessor, successorList)
+                nodeDict.Item(node) <! SuccessorFoundMessage(id, predecessor, successorList)
                 predecessor <- node
             else
                 nodeDict.Item(destination) <! FindSuccessorMessage(node)
         | FixFingerTable -> 
             for f in 0..m - 1 do
-                let neighborNode = id + bigint(System.Math.Pow(2.0, float(f))) % bigint(System.Math.Pow(2.0, float(m)))
+                let neighborNode = id + bigint(Math.Pow(2.0, float(f))) % bigint(Math.Pow(2.0, float(m)))
                 nodeDict.Item(successor) <! FixFingerTableRequest(id, neighborNode)
             system.Scheduler.ScheduleTellOnce(TimeSpan.FromMilliseconds(5.0), mailbox.Self, FixFingerTable)
         | FixFingerTableRequest(sender, node) -> 
@@ -193,13 +178,13 @@ let NodeActor (mailbox:Actor<_>) =
             else
                 nodeDict.Item(destination) <! FixFingerTableRequest(sender, node)
         | FixFingerTableRequestFoundDestination(newFinger) ->
-            let mutable fingerFound = 0
+            let mutable fingerFound = false
             for finger in fingerTable do
                 if finger = newFinger then
-                    fingerFound <- 1
-                else
-                    fingerTable.Add(newFinger)
-                    fingerTable.Sort()
+                    fingerFound <- true
+            if not fingerFound then
+                fingerTable.Add(newFinger)
+                fingerTable.Sort()
         | SuccessorFoundMessage(successor', predecessor', successorList') ->
             successor <- successor'
             predecessor <- predecessor'
@@ -218,10 +203,9 @@ let NodeActor (mailbox:Actor<_>) =
                     predecessorExists <- false
                 else
                     predecessor <- bigint(-1)
-        | SuccessorCheckingPredecessor ->
-            nodeDict.Item(successor) <! PredecessorReply
-        | PredecessorReply -> 
-            predecessorExists <- true
+            system.Scheduler.ScheduleTellOnce(TimeSpan.FromMilliseconds(500.0), mailbox.Self, CheckPredecessor)
+        | SuccessorCheckingPredecessor -> nodeDict.Item(successor) <! PredecessorReply
+        | PredecessorReply -> predecessorExists <- true
         | _ -> ()
         return! loop ()
     }
@@ -258,6 +242,7 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
         | BossStart ->
             // Assigning the identifier length of m, used to identify nodes
             let m = int(ceil((Math.Log(float(numNodes), 2.0))) * 3.0)
+            printfn "m: %i" m
 
             // Iterate through each node in the total number of nodes we have
             // Assign them a name, create their hash based on their name and set an ID for their search
@@ -286,13 +271,13 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
 
                 for j in 0..m-1 do 
                     // Get neighbor in chord
-                    let neighbor = nodeIdDict.Item(i+1) + bigint(int(System.Math.Pow(2.0, float(j)))) % bigint(System.Math.Pow(2.0, float(m)))
+                    let neighbor = nodeIdDict.Item(i+1) + bigint(int(Math.Pow(2.0, float(j)))) % bigint(Math.Pow(2.0, float(m)))
                     let mutable biggerFound:bool = false;
                     
                     // Add a bigger node, if found, to the chord
                     for k in 0..nodeIdList.Count-1 do
                         if neighbor <= nodeIdList.Item(k) && not biggerFound then
-                            fingerTableSet.Add(nodeIdList.Item(0)) |> ignore
+                            fingerTableSet.Add(nodeIdList.Item(k)) |> ignore
                             biggerFound <- true
                     
                     // This seems to re-arrange the neighbors to be properly ordered
