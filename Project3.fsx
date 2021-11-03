@@ -55,13 +55,24 @@ let decideDestination (hash':bigint, id':bigint, predecessor':bigint, successor'
     for i in allFingers do 
         allFingersList.Add(i)
     allFingersList.Sort()
+    printfn "Here4"
+    printfn "Hash %A" hash'
+    printfn "ID %A" id'
+    printfn "Predecesor %A" predecessor'
     if predecessor' <> bigint(-1) && ((predecessor' < id' && (hash' > predecessor' && hash' <= id')) || (predecessor' > id' && ((hash' <= id') || (hash' > id' && hash' > predecessor')))) then
+        printfn "Here5"
         destination <- id'
+        
     else if (id' < successor' && (hash' > id' && hash' <= successor')) || (id' > successor' && ((hash' < id' && hash' <= successor') || hash' > id')) then
+        printfn "Here6"
         destination <- successor'
+        
     else if hash' < allFingersList.Item(0) || hash' > allFingersList.Item(allFingersList.Count - 1) then
+        printfn "Here7"
         destination <- allFingersList.Item(allFingersList.Count - 1)
+        
     else
+        printfn "Here8"
         for i in 0..allFingersList.Count - 2 do
             if i >= 0 && hash' > allFingersList.Item(i) && hash' <= allFingersList.Item(i+1) then
                 destination <- allFingersList.Item(i)
@@ -106,9 +117,8 @@ let NodeActor (mailbox:Actor<_>) =
             // Check to see if the number of requets we already sent is still less than the total we want to send
             if numRequestsSent < numRequests then
                 // Generate random text from some random string
-                let tmpArr = Array.concat([[|'a' .. 'z'|];[|'A' .. 'Z'|];[|'0' .. '9'|]])
-                let n = 5
-                let mutable randomText = ranStr 5 //Array.length tmpArr in String(Array.init n (fun _ -> tmpArr.[Random().Next randomText])) |> ToString
+                let mutable randomText = ranStr 5
+
                 let hash = abs(bigint(stringToByte(randomText) |> HashAlgorithm.Create("SHA1").ComputeHash)) % bigint(Math.Pow(2.0, float(m)))
                 let destination = decideDestination (hash, id, predecessor, successor, fingerTable, successorList)
                 nodeDict.Item(destination) <! RequestMessage(randomText, hash, id, 0)
@@ -116,8 +126,8 @@ let NodeActor (mailbox:Actor<_>) =
                 numRequestsSent <- numRequestsSent + 1
                 printfn "%A" numRequestsSent
                 system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(1.), mailbox.Self, NodeStart)
-            // Temporary fix
-            else //if numRequestsSent = 1 then
+            // Temporary fix // else
+            if numRequestsSent = 1 then
                 // Start the system scheduler to stabilize, fix the finger table, and check for a predecessor
                 system.Scheduler.ScheduleTellOnce(TimeSpan.FromMilliseconds(20.), mailbox.Self, Stabilize)
                 system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(1.), mailbox.Self, FixFingerTable)
