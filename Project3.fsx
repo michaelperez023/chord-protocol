@@ -78,7 +78,7 @@ let NodeActor (mailbox:Actor<_>) =
     let mutable successorList = new List<bigint>()
     let mutable m = -1
     let mutable numHops = 0
-    let mutable predecessorExists:bool = false
+    let mutable predecessorExists:bool = true
     let mutable boss = mailbox.Self
 
     let rec loop () = actor {
@@ -188,11 +188,9 @@ let NodeActor (mailbox:Actor<_>) =
                     predecessorExists <- false
                 else
                     predecessor <- bigint(-1)
-        | SuccessorCheckingPredecessor ->   
-            printfn "PredecessorReply"
+        | SuccessorCheckingPredecessor ->
             nodeDict.Item(successor) <! PredecessorReply
         | PredecessorReply -> 
-            printfn "PredecessorReply"
             predecessorExists <- true
         | _ -> ()
         return! loop ()
