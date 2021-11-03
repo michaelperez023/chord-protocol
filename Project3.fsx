@@ -2,29 +2,53 @@
 #r "nuget: Akka.FSharp"
 
 open System
+open System.IO
 open Akka.Actor
 open Akka.FSharp
 open System.Text
 open System.Security.Cryptography
+open System.Collections.Generic
 
 let system = ActorSystem.Create("System")
 let timer = System.Diagnostics.Stopwatch()
 let r = System.Random()
+let m = int (ceil (Math.Log(float Int32.MaxValue, 10.0) / Math.Log(2.0, 10.0))) - 1
+let totalSpace = int64 (2.0**(float m))
+let nodeDict = new Dictionary<bigint, IActorRef>()
 
 type Message =
-    | Start
-    | Join of int*IActorRef
-    | UpdateFingerTable of Map<int, IActorRef>*Map<int,int>
-    | UpdateSuccessors
-    | RequestFingerTables of IActorRef
-    | NodeAddComplete of int
-    | SetRequests of int
-    | SetFingerTable of Map<int,IActorRef>*Map<int,int>
-    | StartRequesting
-    | SendRequest
-    | Request of IActorRef*int
-    | Receipt
-    | RequestFwd of int*IActorRef*int
+    | BossStart
+    | NodeStart
+    | Complete of int * bigint
+    | Initialize of bigint * int * List<bigint> * bigint * bigint * int * List<bigint>
+    | Update of bigint * int * int
+    | Join of bigint
+    | NodeAddComplete
+    | Stabilize
+    | StabilizeAskSuccessor of bigint
+    | StabilizeSuccessorSendPredecessor of bigint
+    | StabilizeNotify of bigint
+    | FindKey of int * int
+    | FindPredecessor of int * int
+    | FindResult of int * IActorRef * int
+    | FixFingerTable
+    | CheckPredecessor
+    | Notify of IActorRef
+    | GetPredecessor
+    | PrintInfo
+    | RandomQuery
+    | StartRequests of int
+    | AllRequestsSent
+    | RequestHopCount of int
+    | GetPredecessorResult of IActorRef
+    | RequestMessage of string * bigint * bigint * int
+    | RequestReachedDestination of int * string * bigint
+    | FindSuccessorMessage of bigint
+    | SuccessorFoundMessage of bigint * bigint * List<bigint>
+    | FixFingerTableRequest of bigint * bigint
+    | FixFingerTableRequestFoundDestination of bigint
+    | PredecessorReply
+    | SuccessorCheckingPredecessor
 
 let ranStr n = 
     let r = Random()
@@ -32,194 +56,328 @@ let ranStr n =
     let sz = Array.length chars in
     String(Array.init n (fun _ -> chars.[r.Next sz]))
 
-let getHash inputStr M : int =
-    let hashBytes = Encoding.UTF8.GetBytes(inputStr |> string) |> (new SHA256Managed()).ComputeHash
-    //val hashBytes = MessageDigest.getInstance("SHA-1").digest(inputStr.getBytes("UTF-8"))
-    let first4Bytes = hashBytes.[0..4]
-    //printfn "byte 0: %i" hashBytes.[0]
-    let mutable hashCode = 0
-    for i in 0..4 do
-        hashCode <- (hashCode <<< 8) + int (first4Bytes.[i] &&& byte 0xff)
-
-    let mask = int (byte 0xffffffff >>> (32 - M))
-    hashCode <- hashCode &&& mask
-    hashCode
-
-let getRandomHash M : int = 
-    getHash (ranStr 32) M
+let stringToByte(str: string) = System.Text.Encoding.ASCII.GetBytes(str);
 
 let toList s = Set.fold (fun l se -> se::l) [] s
 
-let NodeActor bossNode requests nodes selfID n (mailbox:Actor<_>) =
-    let self = mailbox.Self
-    let mutable fingerTable = Map.empty<int, IActorRef>
-    let mutable fingerPeerID = Map.empty<int, int>
-    let mutable requests = -1
-    let mutable totalHops = 0
-    let mutable messages = 0
-    let mutable cancelRequesting = false
-    let totalNodes = nodes
-
-    let canReplace (peerID: int) = 
-        let mutable distance = 0
-        if(selfID < peerID) then
-            distance <- peerID - selfID
-        else
-            distance <- selfID + int(2. ** 4.) - peerID
-
-        let mutable closest = int(2. ** (Math.Log2(float distance)/Math.Log2(2.)))
-        closest <- (closest + selfID) % n
-        match fingerPeerID.TryFind(closest) with
-            | Some x ->
-                if x = -1 then
-                    true
-                else
-                    (fingerPeerID.[closest] >= peerID)
-            | None -> true
-
-    let rec loop () = actor {
-        let! message = mailbox.Receive()
-        let sender = mailbox.Sender()
-
-        match message with
-        | SetFingerTable(x, y) ->   fingerTable <- x
-                                    fingerPeerID <- y
-        | Join(peerID,peer) ->  printfn "Peer %i has joined the ring" peerID
-                                fingerTable |> Map.iter (fun _key _value ->
-                                    if canReplace peerID then
-                                        fingerTable <- fingerTable |> Map.add _key peer
-                                        fingerPeerID <- fingerPeerID |> Map.add _key peerID
-                                )
-                                fingerTable <- fingerTable |> Map.add peerID peer
-                                peer <! UpdateFingerTable(fingerTable, fingerPeerID)
-        | UpdateFingerTable(x, y) ->    //Function that takes an incoming PeerTable and matches it with the current peer table and updates values
-                                        printfn "Peer %i is updating its fingerTable" selfID
-                                        let mutable updateSuccessorRequest = false
-                                        fingerPeerID |> Map.iter (fun key' value' ->
-                                            let mutable lowestValue =
-                                                if value' = -1 then
-                                                    int (2. ** float n)
-                                                else
-                                                    value'
-                                            let mutable leastKey = int (2. ** float n)        
-                                            y |> Map.iter (fun _key _value ->
-                                                if _value < lowestValue && _value >= key' then
-                                                    lowestValue <- _value
-                                                    leastKey <- _key
-                                            )
-                                            if leastKey <> (int (2. ** float n)) then
-                                                fingerPeerID <- fingerPeerID |> Map.add key' lowestValue
-                                                fingerTable <- fingerTable |> Map.add key' x.[leastKey]
-                                                updateSuccessorRequest <- true
-                                        )
-                                        if updateSuccessorRequest then
-                                            self <! UpdateSuccessors
-        | UpdateSuccessors ->   fingerTable |> Map.iter (fun key_ value_ ->
-                                if not (isNull value_) then
-                                    value_ <! RequestFingerTables(self)
-                                )
-        | RequestFingerTables x -> x <! UpdateFingerTable(fingerTable, fingerPeerID)
-        | StartRequesting -> //Starts Scheduler to schedule SendRequest Message to self mailbox
-                             system.Scheduler.ScheduleTellRepeatedly(TimeSpan.FromSeconds(1.), TimeSpan.FromSeconds(1.), self, SendRequest)
-                             self <! SendRequest
-        | SendRequest ->    //Send a request for a random peer over here
-                            let randomPeer = r.Next(totalNodes)
-                            
-                            printfn "random peer: %i" randomPeer
-                            match fingerTable.TryFind(randomPeer) with
-                                | Some x -> printfn "some"
-                                            x <! Request(self, 1)
-                                | None -> printfn "none"
-                                            //let mutable closest = -1
-                                            //fingerTable |> Map.iter (fun _key _value -> if (_key < randomPeer || _key > closest) then closest <- _key)
-                                            //fingerTable.[closest] <! RequestFwd(randomPeer, self, 1)*)
-        | Request(actor,hops) ->    printfn "requesting!!!"
-                                    totalHops <- totalHops + hops
-                                   //actor <! Receipt
-        | Receipt ->    messages <- messages + 1
-                        if messages = requests then
-                            cancelRequesting <- true
-                            bossNode <! NodeAddComplete(totalHops)
-                        printfn "message received at designated peer"
-        | RequestFwd(reqID, requestingPeer, hops) -> match fingerTable.TryFind(reqID) with
-                                                        | Some actor -> actor <! Request(requestingPeer, hops + 1)
-                                                        | None ->   let mutable closest = -1
-                                                                    fingerTable |> Map.iter (fun _key _value -> if (_key < reqID || _key > closest) then closest <- _key)
-                                                                    fingerTable.[closest] <! RequestFwd(reqID, requestingPeer, hops + 1)
-        | _ -> ()
-        return! loop ()
-    }
-    loop ()
-
-let BossActor nodes (mailbox:Actor<_>) =
-    let mutable totalNodes = nodes
-    let mutable totalHops = 0
-    let mutable addedNodes = 0
-    let mutable requests = 0
-
-    let rec loop () = actor {
-        let! message = mailbox.Receive()
-        let sender = mailbox.Sender()
-
-        match message with
-        | NodeAddComplete hops ->   addedNodes <- addedNodes + 1
-                                    totalHops <- totalHops + hops
-                                    
-                                    if (addedNodes = totalHops) then
-                                        printfn "All the nodes have completed the number of requests to be made with %f average hops" (float(totalHops)/float(requests*totalNodes))
-                                        Environment.Exit(-1)
-        | SetRequests requests_ ->    requests <- requests_
-        | _ -> ()
-        return! loop ()
-    }
-    loop ()
-
-let nearestPower n =
-    if ((n > 0) && (n &&& (n-1) = 0)) then
-        n
+let decideDestination (hash':bigint, id':bigint, predecessor':bigint, successor':bigint, fingerTable':List<bigint>, successorList':List<bigint>) = 
+    let mutable destination = id'
+    let mutable allFingers = HashSet<bigint>()
+    let mutable allFingersList = List<bigint>()
+    for i in fingerTable' do
+        allFingers.Add(i) |> ignore
+    for i in successorList' do
+        allFingersList.Add(i) |> ignore
+    for i in allFingers do 
+        allFingersList.Add(i)
+    allFingersList.Sort()
+    if predecessor' <> bigint(-1) && ((predecessor' < id' && (hash' > predecessor' && hash' <= id')) || (predecessor' > id' && ((hash' <= id') || (hash' > id' && hash' > predecessor')))) then
+        destination <- id'
+    else if (id' < successor' && (hash' > id' && hash' <= successor')) || (id' > successor' && ((hash' < id' && hash' <= successor') || hash' > id')) then
+        destination <- successor'
+    else if hash' < allFingersList.Item(0) || hash' > allFingersList.Item(allFingersList.Count - 1) then
+        destination <- allFingersList.Item(allFingersList.Count - 1)
     else
-        let mutable count = 0
-        let mutable x = n
-        while (x <> 0) do
-            x <- x >>> 1
-            count <- count + 1
-        count
+        for i in 0..allFingersList.Count - 2 do
+            if i >= 0 && hash' > allFingersList.Item(i) && hash' <= allFingersList.Item(i+1) then
+                destination <- allFingersList.Item(i)
+    destination
+
+let NodeActor (mailbox:Actor<_>) =
+    //let sizeLimit = int (2.0**(double m))
+    let mutable numRequestsSent = 0
+    let mutable numRequests = 0
+    let mutable messagesReceived = 0
+    let mutable id = bigint(-1)
+    let mutable fingerTable = new List<bigint>()
+    let mutable predecessor = bigint(-1)
+    let mutable successor = bigint(-1)
+    let mutable successorList = new List<bigint>()
+    let mutable m = -1
+    let mutable numHops = 0
+    let mutable predecessorExists:bool = false
+    let mutable boss = mailbox.Self
+
+    let rec loop () = actor {
+        let! message = mailbox.Receive()
+        if boss = mailbox.Self then
+            boss <- mailbox.Sender()
+
+        match message with
+        | Initialize(id', m', fingerTable', predecessor', successor', numRequests', successorList') -> 
+            id <- id'
+            m <- m'
+            fingerTable <- fingerTable'
+            predecessor <- predecessor'
+            successor <- successor'
+            numRequests <- numRequests'
+            successorList <- successorList'
+        | Update(id', m', numRequests') -> 
+            id <- id'
+            m <- m'
+            numRequests <- numRequests'
+        | NodeStart -> 
+            if numRequestsSent < numRequests then
+                let mutable randomText = ranStr 5
+                let hash = abs(bigint(stringToByte(randomText) |> HashAlgorithm.Create("SHA1").ComputeHash)) % bigint(Math.Pow(2.0, float(m)))
+                let destination = decideDestination (hash, id, predecessor, successor, fingerTable, successorList)
+                nodeDict.Item(destination) <! RequestMessage(randomText, hash, id, 0)
+                numRequestsSent <- numRequestsSent + 1
+                system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(1.), mailbox.Self, NodeStart)
+            if numRequestsSent = 1 then
+                system.Scheduler.ScheduleTellOnce(TimeSpan.FromMilliseconds(20.), mailbox.Self, Stabilize)
+                system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(1.), mailbox.Self, FixFingerTable)
+                system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(0.5), mailbox.Self, CheckPredecessor)
+        | RequestMessage(message', hash', id', hops') -> 
+            let destination = decideDestination (hash', id, predecessor, successor, fingerTable, successorList)
+            let newHops = hops' + 1
+            if destination = id then
+                nodeDict.Item(id') <! RequestReachedDestination(newHops, message', hash')
+            else
+                nodeDict.Item(destination) <! RequestMessage(message', hash', id', newHops)
+        | RequestReachedDestination(hops', message', hash') ->
+            messagesReceived <- messagesReceived + 1
+            numHops <- numHops + hops'
+            if messagesReceived = numRequests then
+                boss <! Complete(numHops, id)
+        | Stabilize -> 
+            if successor <> bigint(-1) then
+                nodeDict.Item(successor) <! StabilizeAskSuccessor(id)
+                system.Scheduler.ScheduleTellOnce(TimeSpan.FromMilliseconds(10.0), mailbox.Self, Stabilize)
+        | StabilizeAskSuccessor(nodeID) ->
+            if predecessor <> bigint(-1) then
+                nodeDict.Item(nodeID) <! StabilizeSuccessorSendPredecessor(nodeID)
+        | StabilizeSuccessorSendPredecessor(nodeID) ->
+            if id <> nodeID then
+                successor <- nodeID
+                successorList.Add(nodeID)
+                successorList.Sort()
+                successorList.RemoveAt(successorList.Count - 1)
+            nodeDict.Item(successor) <! StabilizeNotify(nodeID)
+        | StabilizeNotify(nodeID) -> predecessor <- nodeID
+        | Join(rNode) ->    nodeDict.Item(rNode) <! FindSuccessorMessage(id)
+        | FindSuccessorMessage(node) -> 
+            let destination = decideDestination (node, id, predecessor, successor, fingerTable, successorList)
+            if destination = id && predecessor <> bigint(-1) then
+                nodeDict.Item(node) <! SuccessorFoundMessage(id, predecessor, successorList)
+                predecessor <- node
+            else
+                nodeDict.Item(destination) <! FindSuccessorMessage(node)
+        | FixFingerTable -> 
+            for f in 0..m - 1 do
+                let neighborNode = id + bigint(System.Math.Pow(2.0, float(f))) % bigint(System.Math.Pow(2.0, float(m)))
+                nodeDict.Item(successor) <! FixFingerTableRequest(id, neighborNode)
+            system.Scheduler.ScheduleTellOnce(TimeSpan.FromMilliseconds(5.0), mailbox.Self, FixFingerTable)
+        | FixFingerTableRequest(sender, node) -> 
+            let destination = decideDestination (node, id, predecessor, successor, fingerTable, successorList)
+            if destination = id then
+                nodeDict.Item(sender) <! FixFingerTableRequestFoundDestination(id)
+            else
+                nodeDict.Item(destination) <! FixFingerTableRequest(sender, node)
+        | FixFingerTableRequestFoundDestination(newFinger) ->
+            let mutable fingerFound = 0
+            for finger in fingerTable do
+                if finger = newFinger then
+                    fingerFound <- 1
+                else
+                    fingerTable.Add(newFinger)
+                    fingerTable.Sort()
+        | SuccessorFoundMessage(successor', predecessor', successorList') ->
+            successor <- successor'
+            predecessor <- predecessor'
+            fingerTable.Add(successor')
+            successorList.Add(successor')
+            for i in successorList' do
+                successorList.Add(i)
+            successorList.Sort()
+            nodeDict.Item(id) <! NodeStart
+            system.Scheduler.ScheduleTellOnce(TimeSpan.FromMilliseconds(5.0), mailbox.Self, Stabilize)
+            system.Scheduler.ScheduleTellOnce(TimeSpan.FromMilliseconds(5.0), mailbox.Self, FixFingerTable)
+        | CheckPredecessor ->
+            if predecessor <> bigint(-1) then
+                if predecessorExists then
+                    nodeDict.Item(predecessor) <! SuccessorCheckingPredecessor
+                    predecessorExists <- false
+                else
+                    predecessor <- bigint(-1)
+        | PredecessorReply -> printfn "PredecessorReply"
+                              predecessorExists <- true
+        | SuccessorCheckingPredecessor ->   printfn "PredecessorReply"
+                                            nodeDict.Item(successor) <! PredecessorReply
+        | _ -> ()
+        return! loop ()
+    }
+    loop ()
+
+let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
+    // Setting values for the variables that we will be using
+    let mutable nodeIdDict = new Dictionary<int, bigint>()
+    let mutable completedNodes = 0
+    let mutable numNodes = 0
+    let mutable numNodesLeft = 0
+    let mutable totalHops = 0L
+    let mutable requests = numRequests;
+
+    // Preprocessing of node counts which divides the inputs into a value of the majority of nodes while taking out 10 nodes.
+    // Could be modified easily to have a default value set to less than 100 and then check for greater than 100
+    (*if numNodesInput <= 100 then
+        numNodes <- (numNodesInput - int(0.1 * float(numNodesInput)))
+        numNodesLeft <- (int(0.1 * float(numNodesInput)))
+    else
+        numNodes <- numNodesInput - 10
+        numNodesLeft <- 10*)
+    numNodes <- numNodesInput
+    numNodesLeft <- 5
+    printfn "nodes: %i" numNodes
+    printfn "numNodesLeft: %i" numNodesLeft
+
+    // Start the process of deciding what to do with the message recieved
+    let rec loop () = actor {
+        let! message = mailbox.Receive()
+        let sender = mailbox.Sender()
+
+        match message with
+        // Start the boss
+        | BossStart ->
+            // Assigning the identifier length of m, used to identify nodes
+            let m = int(ceil((Math.Log(float(numNodes), 2.0))) * 3.0)
+
+            // Iterate through each node in the total number of nodes we have
+            // Assign them a name, create their hash based on their name and set an ID for their search
+            // Add these values to the nodeDictionary and the IdDictionary
+            for i in 1..numNodes do
+                let name = "peer" + (i.ToString())
+                let hash = stringToByte(name) |> HashAlgorithm.Create("SHA1").ComputeHash
+                let id = abs(bigint(hash)) % bigint(Math.Pow(2.0, double(m)))
+                nodeDict.Add(id, spawn system ("Node" + string(id)) NodeActor)
+                nodeIdDict.Add(i, id)
+
+            // Now creating a list of all the nodeIDs that were generated and then sorting this list
+            let mutable nodeIdList = new List<bigint>()
+            for i in nodeIdDict.Values do
+                nodeIdList.Add(i)
+            nodeIdList.Sort()
+
+            // Not sure why the indexing begins at 0 now instead of 1
+            // Iterate through each item again from the total number of nodes we have
+            // Gather all the information we will need to start a new node (Lists, Tables, Indexs, etc.)
+            for i in 0..numNodes-1 do
+                // Now we assign values that will be used for the fingerTable and the successorList
+                let mutable fingerTableSet = new HashSet<bigint>()
+                let mutable fingerTable = new List<bigint>()
+                let mutable successorList = new List<bigint>()
+
+                for j in 0..m-1 do 
+                    // Get neighbor in chord
+                    let neighbor = nodeIdDict.Item(i+1) + bigint(int(System.Math.Pow(2.0, float(j)))) % bigint(System.Math.Pow(2.0, float(m)))
+                    let mutable biggerFound:bool = false;
+                    
+                    // Add a bigger node, if found, to the chord
+                    for k in 0..nodeIdList.Count-1 do
+                        if neighbor <= nodeIdList.Item(k) && not biggerFound then
+                            fingerTableSet.Add(nodeIdList.Item(0)) |> ignore
+                            biggerFound <- true
+                    
+                    // This seems to re-arrange the neighbors to be properly ordered
+                    if neighbor > nodeIdList.Item(nodeIdList.Count - 1) then
+                        fingerTableSet.Add(nodeIdList.Item(0)) |> ignore
+                
+                // FingerTableSet seems to be a sorted fingertable with the hash values
+                for l in fingerTableSet do
+                    fingerTable.Add(l)
+                fingerTable.Sort()
+
+                // Gets sorted index list of all the nodes based off their IDs
+                let nodeIndexSortedList = nodeIdList.IndexOf(nodeIdDict.Item(i+1))
+                
+                // Create a list of all the successors based off the newly sorted node index and ID list
+                for m in 1..int((ceil(Math.Log(float(numNodes), 2.0)))) do
+                    let successorIndex = (nodeIndexSortedList + m) % nodeIdList.Count
+                    successorList.Add(nodeIdList.Item(successorIndex))
+                
+                // Set the predecessor based on the node ID list and the location of the items in the node
+                let mutable predecessor = bigint(-1);
+                if nodeIdList.IndexOf(nodeIdDict.Item(i + 1)) > 0 then
+                    predecessor <- nodeIdList.Item(nodeIdList.IndexOf(nodeIdDict.Item(i+1)) - 1)
+                else
+                    predecessor <- nodeIdList.Item(nodeIdList.Count - 1)
+
+                // Set what the successor will be at the current moment for the node based on the ID list
+                // Could be combined with the logic of collecting the successor list
+                let mutable successor = bigint(-1);
+                if nodeIdList.IndexOf(nodeIdDict.Item(i + 1)) + 1 < nodeIdList.Count then
+                    successor <- nodeIdList.Item(nodeIdList.IndexOf(nodeIdDict.Item(i+1)) + 1)
+                else
+                    successor <- nodeIdList.Item(0)
+
+                // Done setting all the values, lists, and indexes that each node will hold
+                // Initialize a node with the data that we currently have available
+                nodeDict.Item(nodeIdDict.Item(i + 1)) <! Initialize((nodeIdDict.Item(i+1)), m, fingerTable, predecessor, successor, requests, successorList)
+            
+            // Each node has now been initialized so now we shall start them up one by one
+            for i in 1..numNodes do
+                nodeDict.Item(nodeIdDict.Item(i)) <! NodeStart
+
+            printfn "numNodes + 1: %i" (numNodes+1)
+            printfn "numNodes+numNodesLeft: %i" (numNodes+numNodesLeft)
+
+            // Iterate through the remaining amount of nodes we have (10)
+            for i in (numNodes+1)..(numNodes+numNodesLeft) do
+                // Assign their name, hash and ID similarly as we have done before
+                let name = "peer" + (i.ToString())
+                let hash = stringToByte(name) |> HashAlgorithm.Create("SHA1").ComputeHash
+                let id = abs(bigint(hash)) % bigint(Math.Pow(2.0, double(m)))
+
+                // Add them to the nodeDict and the nodeIdDict
+                nodeDict.Add(id, spawn system ("Node" + string(id)) NodeActor)
+                nodeIdDict.Add(i, id)
+
+                // Once they are added to the Dict and IdDict we want to update that value
+                nodeDict.Item(nodeIdDict.Item(i)) <! Update((nodeIdDict.Item(i), m, requests))
+            
+            let mutable nodeIdListNew = new List<bigint>()
+            for i in nodeIdDict.Values do
+                nodeIdListNew.Add(i)
+            nodeIdListNew.Sort()
+            for i in (numNodes+1)..(numNodes+numNodesLeft) do
+                let mutable rNode = nodeIdListNew.Item(r.Next(nodeIdList.Count - 1))
+                nodeDict.Item(nodeIdDict.Item(i)) <! Join(rNode)
+
+        | Complete(hops, node) -> // Node completion check
+            // The completed node will increment the counter for total completed nodes
+            completedNodes <- completedNodes + 1
+
+            // Check to see if the number of completed nodes is less than total 
+            // Print the node that just finished
+            if completedNodes <= (numNodes + numNodesLeft) then
+                printfn "%A %d finished with %d hops." node completedNodes hops
+                totalHops <- totalHops + int64(hops)
+
+            // Check to see if the total amount of completed nodes is the total amount of nodes
+            // If so, complete the program
+            //if completedNodes = (numNodes + numNodesLeft) then
+            if completedNodes = numNodes then
+                let avgHops = float(totalHops) / (float(numNodes + numNodesLeft) * float(numRequests))
+                printfn "total hops: %i %f" numNodes avgHops
+                mailbox.Context.System.Terminate() |> ignore
+        | _ -> ()
+        return! loop ()
+    }
+    loop ()
 
 match fsi.CommandLineArgs.Length with
 | 3 ->
-    let mutable numNodes = 5//let numNodes = fsi.CommandLineArgs.[1] |> int
-    let numRequests = 10//let numRequests = fsi.CommandLineArgs.[2] |> int
+    // First input is number of nodes, second input is number of requests per node
+    let numNodes = fsi.CommandLineArgs.[1] |> int
+    let numRequests = fsi.CommandLineArgs.[2] |> int
 
     //timer.Start()
 
-    let bossNode = spawn system "boss" (BossActor numNodes)
-
-    printfn "num nodes: %i" numNodes
-    let nearestPow = nearestPower numNodes
-    let ringCapacity = int (2.**float nearestPow)
-
-    printfn "Nearest Power: %i, Ring Capacity: %i" nearestPow ringCapacity
+    // Go ahead and spawn the boss node with the number of nodes and requests we set
+    let bossNode = spawn system "boss" (BossActor numNodes numRequests)
     
-    bossNode <! SetRequests(numRequests)
-
-    let nodes = [|for i in [0..numNodes-1] -> NodeActor bossNode numRequests numNodes i nearestPow |> spawn system ("Node" + string(i))|]
-
-    for i in [0 .. numNodes-1] do
-        let mutable fingers = Map.empty<int, IActorRef>
-        let mutable peerIDTable = Map.empty<int, int>
-        fingers <- fingers |> Map.add i nodes.[i]
-        for j in [0 .. nearestPow - 1] do
-            let x = i + int (2. ** float j) % int (2.** float nearestPow)
-            fingers <- fingers |> Map.add x null
-            peerIDTable <- peerIDTable |> Map.add x -1
-        nodes.[i] <! SetFingerTable(fingers, peerIDTable)
-
-    let baseActor = nodes.[0]
-    for i in [1 .. numNodes-1] do
-        baseActor <! Join(i, nodes.[i])
-    
-    //for i in [0 .. numNodes-1] do
-    nodes.[0] <! StartRequesting
+    // Start the boss node with the actor message BossStart
+    bossNode <! BossStart
 
     system.WhenTerminated.Wait()
     ()
