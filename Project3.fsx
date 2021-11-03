@@ -51,7 +51,7 @@ let decideDestination (hash':bigint, id':bigint, predecessor':bigint, successor'
     for i in fingerTable' do
         allFingers.Add(i) |> ignore
     for i in successorList' do
-        allFingersList.Add(i) |> ignore
+        allFingers.Add(i) |> ignore
     for i in allFingers do 
         allFingersList.Add(i)
     allFingersList.Sort()
@@ -105,7 +105,7 @@ let NodeActor (mailbox:Actor<_>) =
                 let hash = abs(bigint(stringToByte(randomText) |> HashAlgorithm.Create("SHA1").ComputeHash)) % bigint(Math.Pow(2.0, float(m)))
                 let destination = decideDestination (hash, id, predecessor, successor, fingerTable, successorList)
                 nodeDict.Item(destination) <! RequestMessage(randomText, hash, id, 0)
-                numRequestsSent <- numRequestsSent + 1
+                //numRequestsSent <- numRequestsSent + 1
                 system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(1.), mailbox.Self, NodeStart)
             if numRequestsSent = 1 then
                 system.Scheduler.ScheduleTellOnce(TimeSpan.FromMilliseconds(20.), mailbox.Self, Stabilize)
@@ -129,7 +129,7 @@ let NodeActor (mailbox:Actor<_>) =
                 system.Scheduler.ScheduleTellOnce(TimeSpan.FromMilliseconds(10.0), mailbox.Self, Stabilize)
         | StabilizeAskSuccessor(nodeID) ->
             if predecessor <> bigint(-1) then
-                nodeDict.Item(nodeID) <! StabilizeSuccessorSendPredecessor(nodeID)
+                nodeDict.Item(nodeID) <! StabilizeSuccessorSendPredecessor(predecessor)
         | StabilizeSuccessorSendPredecessor(nodeID) ->
             if id <> nodeID then
                 successor <- nodeID
@@ -138,11 +138,13 @@ let NodeActor (mailbox:Actor<_>) =
                 successorList.RemoveAt(successorList.Count - 1)
             nodeDict.Item(successor) <! StabilizeNotify(nodeID)
         | StabilizeNotify(nodeID) -> predecessor <- nodeID
-        //| Join(rNode) ->    nodeDict.Item(rNode) <! FindSuccessorMessage(id)
+        | Join(rNode) ->    nodeDict.Item(rNode) <! FindSuccessorMessage(id)
         | FindSuccessorMessage(node) -> 
+            //printfn "FindSuccessorMessage"
             let destination = decideDestination (node, id, predecessor, successor, fingerTable, successorList)
+            //printfn "destination: %A" destination
             if destination = id && predecessor <> bigint(-1) then
-                nodeDict.Item(node) <! SuccessorFoundMessage(id, predecessor, successorList)
+                //nodeDict.Item(node) <! SuccessorFoundMessage(id, predecessor, successorList)
                 predecessor <- node
             else
                 nodeDict.Item(destination) <! FindSuccessorMessage(node)
@@ -181,8 +183,8 @@ let NodeActor (mailbox:Actor<_>) =
                 if predecessorExists then
                     nodeDict.Item(predecessor) <! SuccessorCheckingPredecessor
                     predecessorExists <- false
-                //else
-                //    predecessor <- bigint(-1)
+                else
+                    predecessor <- bigint(-1)
         | PredecessorReply -> printfn "PredecessorReply"
                               predecessorExists <- true
         | SuccessorCheckingPredecessor ->   printfn "PredecessorReply"
@@ -217,7 +219,6 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
     // Start the process of deciding what to do with the message recieved
     let rec loop () = actor {
         let! message = mailbox.Receive()
-        let sender = mailbox.Sender()
 
         match message with
         // Start the boss
@@ -292,7 +293,6 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
                     successor <- nodeIdList.Item(nodeIdList.IndexOf(nodeIdDict.Item(i+1)) + 1)
                 else
                     successor <- nodeIdList.Item(0)
-
                 // Done setting all the values, lists, and indexes that each node will hold
                 // Initialize a node with the data that we currently have available
                 nodeDict.Item(nodeIdDict.Item(i + 1)) <! Initialize((nodeIdDict.Item(i+1)), m, fingerTable, predecessor, successor, requests, successorList)
@@ -341,7 +341,7 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
             if completedNodes = numNodes then
                 let avgHops = float(totalHops) / (float(numNodes + numNodesLeft) * float(numRequests))
                 printfn "total hops: %i %f" numNodes avgHops
-                mailbox.Context.System.Terminate() |> ignore
+                exit 0
         | _ -> ()
         return! loop ()
     }
