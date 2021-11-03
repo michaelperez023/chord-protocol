@@ -87,6 +87,7 @@ let NodeActor (mailbox:Actor<_>) =
             boss <- mailbox.Sender()
 
         match message with
+        // Initializ all the values for the variables based off the data generated from the boss node
         | Initialize(id', m', fingerTable', predecessor', successor', numRequests', successorList') -> 
             id <- id'
             m <- m'
@@ -95,13 +96,19 @@ let NodeActor (mailbox:Actor<_>) =
             successor <- successor'
             numRequests <- numRequests'
             successorList <- successorList'
+        // Update the new values for the ID, the number of requests, and the bytesize
         | Update(id', m', numRequests') -> 
             id <- id'
             m <- m'
             numRequests <- numRequests'
+        // Start the node!
         | NodeStart -> 
+            // Check to see if the number of requets we already sent is still less than the total we want to send
             if numRequestsSent < numRequests then
-                let mutable randomText = ranStr 5
+                // Generate random text from some random string
+                let tmpArr = Array.concat([[|'a' .. 'z'|];[|'A' .. 'Z'|];[|'0' .. '9'|]])
+                let n = 5
+                let mutable randomText = ranStr 5 //Array.length tmpArr in String(Array.init n (fun _ -> tmpArr.[Random().Next randomText])) |> ToString
                 let hash = abs(bigint(stringToByte(randomText) |> HashAlgorithm.Create("SHA1").ComputeHash)) % bigint(Math.Pow(2.0, float(m)))
                 let destination = decideDestination (hash, id, predecessor, successor, fingerTable, successorList)
                 nodeDict.Item(destination) <! RequestMessage(randomText, hash, id, 0)
@@ -111,10 +118,14 @@ let NodeActor (mailbox:Actor<_>) =
                 system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(1.), mailbox.Self, NodeStart)
             // Temporary fix
             else //if numRequestsSent = 1 then
+                // Start the system scheduler to stabilize, fix the finger table, and check for a predecessor
                 system.Scheduler.ScheduleTellOnce(TimeSpan.FromMilliseconds(20.), mailbox.Self, Stabilize)
                 system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(1.), mailbox.Self, FixFingerTable)
                 system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(0.5), mailbox.Self, CheckPredecessor)
+        // Request to join the network
         | RequestMessage(message', hash', id', hops') -> 
+            //Decide destination, augment the hops, and state that the destination has been reaches as long as the id matches the destination
+            // Else request again with new hops until the proper item is hit
             let destination = decideDestination (hash', id, predecessor, successor, fingerTable, successorList)
             let newHops = hops' + 1
             if destination = id then
@@ -122,26 +133,35 @@ let NodeActor (mailbox:Actor<_>) =
             else
                 nodeDict.Item(destination) <! RequestMessage(message', hash', id', newHops)
         | RequestReachedDestination(hops') ->
+            // Augment messages received and the number of hops
             messagesReceived <- messagesReceived + 1
             numHops <- numHops + hops'
+
+            // If a message has been recieved the same amount of times requests have been received then we are done
             if messagesReceived = numRequests then
                 boss <! Complete(numHops, id)
+        // Stabilize the chord
         | Stabilize -> 
+            // Check that successor exists
             if successor <> bigint(-1) then
                 nodeDict.Item(successor) <! StabilizeAskSuccessor(id)
                 system.Scheduler.ScheduleTellOnce(TimeSpan.FromMilliseconds(10.0), mailbox.Self, Stabilize)
         | StabilizeAskSuccessor(nodeID) ->
+            // check that predecessor exists
             if predecessor <> bigint(-1) then
                 nodeDict.Item(nodeID) <! StabilizeSuccessorSendPredecessor(predecessor)
         | StabilizeSuccessorSendPredecessor(nodeID) ->
+            // If the id is not the same as the nodeID then we need to stabilize, else we can add to the chord again
             if id <> nodeID then
                 successor <- nodeID
                 successorList.Add(nodeID)
                 successorList.Sort()
                 successorList.RemoveAt(successorList.Count - 1)
             nodeDict.Item(successor) <! StabilizeNotify(nodeID)
-        | StabilizeNotify(nodeID) -> predecessor <- nodeID
-        | Join(rNode) ->    nodeDict.Item(rNode) <! FindSuccessorMessage(id)
+        | StabilizeNotify(nodeID) -> 
+            predecessor <- nodeID
+        | Join(rNode) ->
+            nodeDict.Item(rNode) <! FindSuccessorMessage(id)
         | FindSuccessorMessage(node) -> 
             //printfn "FindSuccessorMessage"
             let destination = decideDestination (node, id, predecessor, successor, fingerTable, successorList)
