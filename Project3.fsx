@@ -12,7 +12,6 @@ let system = ActorSystem.Create("System")
 let r = Random()
 let nodeDict = new Dictionary<bigint, IActorRef>()
 
-// Switch up the order of inputs
 type Message =
     | BossStart
     | CheckPredecessor
