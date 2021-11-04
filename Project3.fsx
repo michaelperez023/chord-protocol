@@ -134,6 +134,7 @@ let NodeActor (mailbox:Actor<_>) =
         // Send a message from the predecessor indicating to the successor where it is located
         | SuccessorPredecessorCheck -> 
             nodeDict.Item(successor) <! PredecessorCheck
+        // Send true that the predecessor checks out
         | PredecessorCheck -> 
             predecessorCheck <- true
         // Obtain information on where the successor of a node may be at
