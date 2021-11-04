@@ -146,7 +146,7 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
     let mutable numNodes = 0
     let mutable numNodesLeft = 0
     let mutable requests = numRequests;
-    let mutable totalHops = 0L    
+    let mutable totalHops = 0  
 
     // Preprocessing of node counts which divides the inputs into a value of the majority of nodes while taking out 10 nodes.
     // Could be modified easily to have a default value set to less than 100 and then check for greater than 100
@@ -158,8 +158,8 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
         numNodesLeft <- 10
     //numNodes <- numNodesInput
     //numNodesLeft <- 5
-    printfn "nodes: %i" numNodes
-    printfn "numNodesLeft: %i" numNodesLeft
+    printfn "Number of nodes: %i" numNodes
+    printfn "Number of nodes left: %i" numNodesLeft
 
     // Start the process of deciding what to do with the message recieved
     let rec loop () = actor {
@@ -267,18 +267,17 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
                 let mutable rNode = nodeIdListNew.Item(r.Next(nodeIdList.Count - 1))
                 nodeDict.Item(nodeIdDict.Item(i)) <! Join(rNode)
         | Complete(hops, node) -> // Node completion check
-            // Increment completed nodes
-            completedNodes <- completedNodes + 1
+            completedNodes <- completedNodes + 1 // Increment completed nodes
 
             // Print node that just finished if number of completed nodes is less than total 
-            if completedNodes <= (numNodes + numNodesLeft) then
-                printfn "Node %A completed after %d hops. %d nodes have completed." node hops completedNodes
-                totalHops <- totalHops + int64(hops)
+            printfn "Node %A completed after %d hops. %d nodes have completed." node hops completedNodes
+            totalHops <- totalHops + hops
 
             // Exit program if number of completed nodes is equal to number of nodes
             if completedNodes = numNodes then
-                let avgHops = float(totalHops) / (float(numNodes + numNodesLeft) * float(numRequests))
-                printfn "Total hops: %i %f" numNodes avgHops
+                printfn "Total nodes: %i" numNodes
+                printfn "Total hops: %i" totalHops
+                printfn "Average hops: %f" (float(totalHops) / (float(numNodes + numNodesLeft) * float(numRequests)))
                 exit 0
         | _ -> ()
         return! loop ()
