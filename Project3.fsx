@@ -1,4 +1,5 @@
 // Authors: Blas Kojusner and Michael Perez - UFID: 62498470 - Distributed Operating Systems - COP5615 - Project3
+#time "on"
 #r "nuget: Akka.FSharp"
 
 open System
@@ -35,31 +36,28 @@ let ranStr n =
 
 let stringToByte(str: string) = System.Text.Encoding.ASCII.GetBytes(str);
 
-let decideDestination (hash':bigint, id':bigint, predecessor':bigint, successor':bigint, fingerTable':List<bigint>, successorList':List<bigint>) = 
+let routeNode(hash':bigint, id':bigint, predecessor':bigint, successor':bigint, fingerTable':List<bigint>, successorList':List<bigint>) = 
     let mutable destination = id'
-    let mutable allFingers = HashSet<bigint>()
-    let mutable allFingersList = List<bigint>()
+    let mutable fingers = List<bigint>()
     for i in fingerTable' do
-        allFingers.Add(i) |> ignore
+        fingers.Add(i) |> ignore
     for i in successorList' do
-        allFingers.Add(i) |> ignore
-    for i in allFingers do 
-        allFingersList.Add(i)
-    allFingersList.Sort()
-    if predecessor' <> bigint(-1) && ((predecessor' < id' && (hash' > predecessor' && hash' <= id')) || (predecessor' > id' && ((hash' <= id') || (hash' > id' && hash' > predecessor')))) then
+        fingers.Add(i) |> ignore
+    fingers.Sort()
+    
+    if ((((hash' <= id') || (hash' > id' && (hash' > predecessor'))) && (predecessor' > id') || (((hash' > predecessor') && (hash' <= id')))) && (predecessor' < id')) && (predecessor' <> bigint(-1)) then
         destination <- id'
+    else if hash' < fingers.Item(0) || hash' > fingers.Item(fingers.Count - 1) then
+        destination <- fingers.Item(fingers.Count - 1)
     else if (id' < successor' && (hash' > id' && hash' <= successor')) || (id' > successor' && ((hash' < id' && hash' <= successor') || hash' > id')) then
         destination <- successor'
-    else if hash' < allFingersList.Item(0) || hash' > allFingersList.Item(allFingersList.Count - 1) then
-        destination <- allFingersList.Item(allFingersList.Count - 1)
     else
-        for i in 0..allFingersList.Count - 2 do
-            if i >= 0 && hash' > allFingersList.Item(i) && hash' <= allFingersList.Item(i+1) then
-                destination <- allFingersList.Item(i)
+        for i in 0..fingers.Count - 1 do
+            if hash' > fingers.Item(i) && hash' <= fingers.Item(i+1) then
+                destination <- fingers.Item(i)
     destination
 
 let NodeActor (mailbox:Actor<_>) =
-    //let mutable numRequestsSent = 0
     let mutable numRequests = 0
     let mutable messagesReceived = 0
     let mutable id = bigint(-1)
@@ -95,12 +93,11 @@ let NodeActor (mailbox:Actor<_>) =
             // Generate random text from some random string
             let mutable randomText = ranStr 5
             let hash = abs(bigint(stringToByte(randomText) |> HashAlgorithm.Create("SHA1").ComputeHash)) % bigint(Math.Pow(2.0, float(m)))
-            let destination = decideDestination(hash, id, predecessor, successor, fingerTable, successorList)
+            let destination = routeNode(hash, id, predecessor, successor, fingerTable, successorList)
             nodeDict.Item(destination) <! RequestMessage(randomText, hash, id, 0)
-            system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(1.), mailbox.Self, NodeStart)
-            
+            system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(1.), mailbox.Self, NodeStart) // send request once/second
         | RequestMessage(message', hash', id', hops') -> 
-            let destination = decideDestination(hash', id, predecessor, successor, fingerTable, successorList)
+            let destination = routeNode(hash', id, predecessor, successor, fingerTable, successorList)
             let newHops = hops' + 1
             if destination = id then
                 nodeDict.Item(id') <! RequestReachedDestination(newHops)
@@ -114,7 +111,7 @@ let NodeActor (mailbox:Actor<_>) =
         | Join(rNode) -> 
             nodeDict.Item(rNode) <! FindSuccessorMessage(id)
         | FindSuccessorMessage(node) -> 
-            let destination = decideDestination(node, id, predecessor, successor, fingerTable, successorList)
+            let destination = routeNode(node, id, predecessor, successor, fingerTable, successorList)
             if destination = id && predecessor <> bigint(-1) then
                 nodeDict.Item(node) <! SuccessorFoundMessage(id, predecessor, successorList)
                 predecessor <- node
@@ -157,25 +154,23 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
 
     // Preprocessing of node counts which divides the inputs into a value of the majority of nodes while taking out 10 nodes.
     // Could be modified easily to have a default value set to less than 100 and then check for greater than 100
-    (*if numNodesInput <= 100 then
+    if numNodesInput <= 100 then
         numNodes <- (numNodesInput - int(0.1 * float(numNodesInput)))
         numNodesLeft <- (int(0.1 * float(numNodesInput)))
     else
         numNodes <- numNodesInput - 10
-        numNodesLeft <- 10*)
-    numNodes <- numNodesInput
-    numNodesLeft <- 5
+        numNodesLeft <- 10
+    //numNodes <- numNodesInput
+    //numNodesLeft <- 5
     printfn "nodes: %i" numNodes
     printfn "numNodesLeft: %i" numNodesLeft
 
     // Start the process of deciding what to do with the message recieved
     let rec loop () = actor {
         let! message = mailbox.Receive()
-
         match message with
-        // Start the boss
-        | BossStart ->
-            // Assigning the identifier length of m, used to identify nodes
+        | BossStart -> // Start boss
+            // Assign the identifier length of m, used to identify nodes
             let m = int(ceil((Math.Log(float(numNodes), 2.0))) * 3.0)
             printfn "m: %i" m
 
@@ -189,7 +184,7 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
                 nodeDict.Add(id, spawn system ("Node" + string(id)) NodeActor)
                 nodeIdDict.Add(i, id)
 
-            // Now creating a list of all the nodeIDs that were generated and then sorting this list
+            // Now create a list of all the nodeIDs that were generated and then sort it
             let mutable nodeIdList = new List<bigint>()
             for i in nodeIdDict.Values do
                 nodeIdList.Add(i)
@@ -250,14 +245,11 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
                 // Initialize a node with the data that we currently have available
                 nodeDict.Item(nodeIdDict.Item(i + 1)) <! Initialize((nodeIdDict.Item(i+1)), m, fingerTable, predecessor, successor, requests, successorList)
             
-            // Each node has now been initialized so now we shall start them up one by one
+            // Each node has been initialized, so start each one
             for i in 1..numNodes do
                 nodeDict.Item(nodeIdDict.Item(i)) <! NodeStart
 
-            printfn "numNodes + 1: %i" (numNodes+1)
-            printfn "numNodes+numNodesLeft: %i" (numNodes+numNodesLeft)
-
-            // Iterate through the remaining amount of nodes we have (10)
+            // Iterate through nodes left
             for i in (numNodes+1)..(numNodes+numNodesLeft) do
                 // Assign their name, hash and ID similarly as we have done before
                 let name = "peer" + (i.ToString())
@@ -279,20 +271,18 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
                 let mutable rNode = nodeIdListNew.Item(r.Next(nodeIdList.Count - 1))
                 nodeDict.Item(nodeIdDict.Item(i)) <! Join(rNode)
         | Complete(hops, node) -> // Node completion check
-            // The completed node will increment the counter for total completed nodes
+            // Increment completed nodes
             completedNodes <- completedNodes + 1
 
-            // Check to see if the number of completed nodes is less than total 
-            // Print the node that just finished
+            // Print node that just finished if number of completed nodes is less than total 
             if completedNodes <= (numNodes + numNodesLeft) then
-                printfn "%A %d finished with %d hops." node completedNodes hops
+                printfn "Node %A completed after %d hops. %d nodes have completed." node hops completedNodes
                 totalHops <- totalHops + int64(hops)
 
-            // Check to see if the total amount of completed nodes is the total amount of nodes
-            // If so, complete the program
+            // Exit program if number of completed nodes is equal to number of nodes
             if completedNodes = numNodes then
                 let avgHops = float(totalHops) / (float(numNodes + numNodesLeft) * float(numRequests))
-                printfn "total hops: %i %f" numNodes avgHops
+                printfn "Total hops: %i %f" numNodes avgHops
                 exit 0
         | _ -> ()
         return! loop ()
