@@ -61,14 +61,14 @@ let NodeActor (mailbox:Actor<_>) =
         // Is the hash less than or equal to the ID
         // Is the hash greater than the ID and predecessor while the predecessor is greater than the ID
         // Is the hash greater than the predecessor while the ID is greater than the predecessor and the hash and the predecesor is not uninitialized
-        if ((((hash' <= id') || (hash' > id' && (hash' > predecessor'))) && (predecessor' > id') || (((hash' > predecessor') && (hash' <= id')))) && (predecessor' < id')) && (predecessor' <> bigint(-1)) then
+        if ((((id' >= hash') || (id' < hash' && (hash' > predecessor'))) && (id' < predecessor') || (((hash' > predecessor') && (hash' <= id')))) && (predecessor' < id')) && (predecessor' <> bigint(-1)) then
             slot <- id'
         // If the initial conditions are not met, we want to see if the hash is less than the first item or if it is greater than the last item
-        else if hash' < fingers.Item(0) || hash' > fingers.Item(fingers.Count - 1) then
+        else if hash' < fingers.Item(0) || fingers.Item(fingers.Count - 1) < hash' then
             slot <- fingers.Item(fingers.Count - 1)
         // We then want to see if the successor is greater than the ID and the hash, all the while the hash is greater than the ID
         // Or if the ID is greater than the successor and the hash while the hass is less than the successor
-        else if (id' < successor' && (hash' > id' && hash' <= successor')) || (id' > successor' && ((hash' < id' && hash' <= successor') || hash' > id')) then
+        else if (id' < successor' && (hash' > id' && hash' <= successor')) || (id' > successor' && ((id' < hash' && hash' <= successor') || id' < hash')) then
             slot <- successor'
         // If none of the conditions are met we will traverse the finger table and compare the current value with the hash and allocate it on to the new slot
         else
@@ -171,14 +171,9 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
 
     // Preprocessing of node counts which divides the inputs into a value of the majority of nodes while taking out 10 nodes.
     // Could be modified easily to have a default value set to less than 100 and then check for greater than 100
-    if numNodesInput <= 100 then
-        numNodes <- (numNodesInput - int(0.1 * float(numNodesInput)))
-        numNodesLeft <- (int(0.1 * float(numNodesInput)))
-    else
-        numNodes <- numNodesInput - 10
-        numNodesLeft <- 10
-    //numNodes <- numNodesInput
-    //numNodesLeft <- 5
+    numNodes <- int(0.9 * float(numNodesInput))
+    numNodesLeft <- int(0.1 * float(numNodesInput))
+
     printfn "Number of nodes: %i" numNodes
     printfn "Number of nodes left: %i" numNodesLeft
 
@@ -187,7 +182,7 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
         let! message = mailbox.Receive()
         match message with
         | BossStart -> // Start boss
-            let m = int(ceil((Math.Log(float(numNodes), 2.0))) * 3.0) // Assign m
+            let m = int(ceil(Math.Log(float(numNodes), 2.0)) * 3.0) // Assign m
             printfn "m: %i" m
 
             // Iterate through each node in the total number of nodes we have
@@ -207,8 +202,8 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
             // Gather all the information we will need to start a new node (Lists, Tables, Indices, etc.)
             for i in 0..numNodes-1 do
                 // Assign values that will be used for the fingerTable and the successors
-                let mutable fingerTable = new List<bigint>()
                 let mutable successors = new List<bigint>()
+                let mutable fingerTable = new List<bigint>()
                 for j in 0..m-1 do 
                     // Get neighbor in chord
                     let neighbor = nodeIdDict.Item(i+1) + bigint(int(Math.Pow(2.0, float(j)))) % bigint(Math.Pow(2.0, float(m)))
@@ -267,7 +262,7 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
                 nodeIdListFinal.Add(i)
             nodeIdListFinal.Sort()
             for i in (numNodes+1)..(numNodes+numNodesLeft) do
-                nodeDict.Item(nodeIdDict.Item(i)) <! Join(nodeIdListFinal.Item(r.Next(nodeIdList.Count - 1)))
+                nodeDict.Item(nodeIdDict.Item(i)) <! Join(nodeIdListFinal.Item(r.Next(nodeIdList.Count)))
         | Complete(hops, node) -> // Node completion check
             // Print node that just finished if number of completed nodes is less than total 
             printfn "Node %A completed after %d hops. %d nodes have completed." node hops completedNodes
