@@ -194,9 +194,7 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
             // Assign them a name, create their hash based on their name and set an ID for their search
             // Add these values to the nodeDictionary and the IdDictionary
             for i in 1..numNodes do
-                let name = "peer" + (i.ToString())
-                let hash = System.Text.Encoding.ASCII.GetBytes(name) |> HashAlgorithm.Create("SHA1").ComputeHash
-                let id = abs(bigint(hash)) % bigint(Math.Pow(2.0, double(m)))
+                let id = abs(bigint(System.Text.Encoding.ASCII.GetBytes("peer" + (i.ToString())) |> HashAlgorithm.Create("SHA1").ComputeHash)) % bigint(Math.Pow(2.0, double(m)))
                 nodeDict.Add(id, spawn system ("Node" + string(id)) NodeActor)
                 nodeIdDict.Add(i, id)
 
@@ -256,9 +254,7 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
 
             for i in (numNodes+1)..(numNodes+numNodesLeft) do // Iterate through nodes left
                 // Assign the name, hash and ID similarly as done before
-                let name = "peer" + (i.ToString())
-                let hash = System.Text.Encoding.ASCII.GetBytes(name) |> HashAlgorithm.Create("SHA1").ComputeHash
-                let id = abs(bigint(hash)) % bigint(Math.Pow(2.0, double(m)))
+                let id = abs(bigint(System.Text.Encoding.ASCII.GetBytes("peer" + (i.ToString())) |> HashAlgorithm.Create("SHA1").ComputeHash)) % bigint(Math.Pow(2.0, double(m)))
 
                 // Add them to the nodeDict and the nodeIdDict
                 nodeDict.Add(id, spawn system ("Node" + string(id)) NodeActor)
