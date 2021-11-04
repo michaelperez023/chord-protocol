@@ -103,8 +103,22 @@ let NodeActor (mailbox:Actor<_>) =
             messagesReceived <- messagesReceived + 1
             if messagesReceived = numRequests then
                 boss <! Complete(numHops, id)
-        | Join(node) -> 
-            nodeDict.Item(node) <! GetSuccessor(id)
+        // Check if the predecessor exists
+        | CheckPredecessor ->
+            if predecessor <> bigint(-1) then
+                if not predecessorCheck then
+                    predecessor <- bigint(-1)
+                else
+                    nodeDict.Item(predecessor) <! SuccessorPredecessorCheck
+                    predecessorCheck <- false
+            system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(0.5), mailbox.Self, CheckPredecessor)
+        // Send a message from the predecessor indicating to the successor where it is located
+        | SuccessorPredecessorCheck -> 
+            nodeDict.Item(successor) <! PredecessorCheck
+        // Send true that the predecessor checks out
+        | PredecessorCheck -> 
+            predecessorCheck <- true
+        // Obtain information on where the successor of a node may be at
         | GetSuccessor(node) -> 
             let destination = routeNode(node, id, predecessor, successor, fingerTable, successors)
             if destination = id && predecessor <> bigint(-1) then
