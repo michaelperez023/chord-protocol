@@ -32,6 +32,7 @@ let ranStr n =
     let sz = Array.length chars in String(Array.init n (fun _ -> chars.[r.Next sz]))
 
 let NodeActor (mailbox:Actor<_>) =
+    // Declare variables we will be using
     let mutable numRequests = 0
     let mutable messagesReceived = 0
     let mutable id = bigint(-1)
@@ -44,7 +45,9 @@ let NodeActor (mailbox:Actor<_>) =
     let mutable numHops = 0
     let mutable boss = mailbox.Self
 
+    // Routing mechanism to pick the slot a new node will fit under in our chord network
     let routeNode(hash':bigint, id':bigint, predecessor':bigint, successor':bigint, fingerTable':List<bigint>, successors':List<bigint>) = 
+        // Copy all the fingers and successors from the finger table and sort them to decide new slot
         let mutable fingers = List<bigint>()
         for i in fingerTable' do
             fingers.Add(i) |> ignore
@@ -53,12 +56,21 @@ let NodeActor (mailbox:Actor<_>) =
         fingers.Sort()
         
         let mutable slot = id'
+        
+        // In the first if statement we want to see a few things
+        // Is the hash less than or equal to the ID
+        // Is the hash greater than the ID and predecessor while the predecessor is greater than the ID
+        // Is the hash greater than the predecessor while the ID is greater than the predecessor and the hash and the predecesor is not uninitialized
         if ((((hash' <= id') || (hash' > id' && (hash' > predecessor'))) && (predecessor' > id') || (((hash' > predecessor') && (hash' <= id')))) && (predecessor' < id')) && (predecessor' <> bigint(-1)) then
             slot <- id'
+        // If the initial conditions are not met, we want to see if the hash is less than the first item or if it is greater than the last item
         else if hash' < fingers.Item(0) || hash' > fingers.Item(fingers.Count - 1) then
             slot <- fingers.Item(fingers.Count - 1)
+        // We then want to see if the successor is greater than the ID and the hash, all the while the hash is greater than the ID
+        // Or if the ID is greater than the successor and the hash while the hass is less than the successor
         else if (id' < successor' && (hash' > id' && hash' <= successor')) || (id' > successor' && ((hash' < id' && hash' <= successor') || hash' > id')) then
             slot <- successor'
+        // If none of the conditions are met we will traverse the finger table and compare the current value with the hash and allocate it on to the new slot
         else
             for i in 0..fingers.Count - 1 do
                 if hash' > fingers.Item(i) && hash' <= fingers.Item(i+1) then
@@ -71,8 +83,10 @@ let NodeActor (mailbox:Actor<_>) =
             boss <- mailbox.Sender()
 
         match message with
+        // We first want to see if the node can join the network
         | Join(node) -> 
             nodeDict.Item(node) <! GetSuccessor(id)
+        // A node will then be initialized with all the values obtained from the boss node about the network
         | Initialize(id', predecessor', successor', m', numRequests', successors', fingerTable') -> 
             id <- id'
             predecessor <- predecessor'
@@ -81,10 +95,12 @@ let NodeActor (mailbox:Actor<_>) =
             numRequests <- numRequests'
             successors <- successors'
             fingerTable <- fingerTable'
+        // Values could be updated if there is  change in the number of requests, the byte size m, or the ID of a node
         | Update(m', numRequests', id') -> 
             m <- m'
             numRequests <- numRequests'
             id <- id'
+        // The node can then start on the network and begin communicating with other nodes and being an active part of the network
         | NodeStart -> 
             // Generate random text from some random string
             let mutable randomText = ranStr 5
@@ -92,6 +108,7 @@ let NodeActor (mailbox:Actor<_>) =
             let slot = routeNode(hash, id, predecessor, successor, fingerTable, successors)
             nodeDict.Item(slot) <! Request(randomText, 0, hash, id)
             system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(1.), mailbox.Self, NodeStart) // send request once/second
+        // we want to send a request to a node to and see if it can route a message accross the network
         | Request(message', hops', hash', id') -> 
             let slot = routeNode(hash', id, predecessor, successor, fingerTable, successors)
             let hopsCounter = hops' + 1
@@ -99,11 +116,27 @@ let NodeActor (mailbox:Actor<_>) =
                 nodeDict.Item(id') <! RequestRouted(hopsCounter)
             else
                 nodeDict.Item(slot) <! Request(message', hopsCounter, hash', id')
+        // Check the amount of hops it took for a request to get routed through the network
         | RequestRouted(hops') ->
             numHops <- numHops + hops'
             messagesReceived <- messagesReceived + 1
             if messagesReceived = numRequests then
                 boss <! Complete(numHops, id)
+        // Check if the predecessor exists
+        | CheckPredecessor ->
+            if predecessor <> bigint(-1) then
+                if not predecessorCheck then
+                    predecessor <- bigint(-1)
+                else
+                    nodeDict.Item(predecessor) <! SuccessorPredecessorCheck
+                    predecessorCheck <- false
+            system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(0.5), mailbox.Self, CheckPredecessor)
+        // Send a message from the predecessor indicating to the successor where it is located
+        | SuccessorPredecessorCheck -> 
+            nodeDict.Item(successor) <! PredecessorCheck
+        | PredecessorCheck -> 
+            predecessorCheck <- true
+        // Obtain information on where the successor of a node may be at
         | GetSuccessor(node) -> 
             let slot = routeNode(node, id, predecessor, successor, fingerTable, successors)
             if slot = id && predecessor <> bigint(-1) then
@@ -111,6 +144,7 @@ let NodeActor (mailbox:Actor<_>) =
                 predecessor <- node
             else
                 nodeDict.Item(slot) <! GetSuccessor(node)
+        // Check to see where the successor is based on the ID, Predecessor, and other Successors
         | SuccessorCheck(successor', predecessor', successors') ->
             fingerTable.Add(successor')
             successors.Add(successor')
@@ -120,18 +154,6 @@ let NodeActor (mailbox:Actor<_>) =
                 successors.Add(i)
             successors.Sort()
             nodeDict.Item(id) <! NodeStart
-        | CheckPredecessor ->
-            if predecessor <> bigint(-1) then
-                if not predecessorCheck then
-                    predecessor <- bigint(-1)
-                else
-                    nodeDict.Item(predecessor) <! SuccessorPredecessorCheck
-                    predecessorCheck <- false
-            system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(0.5), mailbox.Self, CheckPredecessor)
-        | SuccessorPredecessorCheck -> 
-            nodeDict.Item(successor) <! PredecessorCheck
-        | PredecessorCheck -> 
-            predecessorCheck <- true
         | _ -> ()
         return! loop ()
     }
