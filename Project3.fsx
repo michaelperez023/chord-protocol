@@ -18,21 +18,19 @@ type Message =
     | CheckPredecessor
     | Complete of int * bigint
     | GetSuccessor of bigint
-    | Initialize of bigint * int * bigint * bigint * int * List<bigint> * List<bigint>
+    | Initialize of bigint * bigint * bigint * int * int * List<bigint> * List<bigint>
     | Join of bigint
     | NodeStart
     | PredecessorCheck
-    | Request of string * bigint * bigint * int
+    | Request of string * int * bigint * bigint
     | RequestRouted of int
     | SuccessorCheck of bigint * bigint * List<bigint>
     | SuccessorPredecessorCheck
-    | Update of bigint * int * int
+    | Update of int * int * bigint
     
 let ranStr n = 
     let chars = Array.concat([[|'a' .. 'z'|];[|'A' .. 'Z'|];[|'0' .. '9'|]])
     let sz = Array.length chars in String(Array.init n (fun _ -> chars.[r.Next sz]))
-
-
 
 let NodeActor (mailbox:Actor<_>) =
     let mutable numRequests = 0
@@ -41,17 +39,17 @@ let NodeActor (mailbox:Actor<_>) =
     let mutable fingerTable = new List<bigint>()
     let mutable predecessor = bigint(-1)
     let mutable successor = bigint(-1)
-    let mutable successorList = new List<bigint>()
+    let mutable successors = new List<bigint>()
     let mutable m = -1
     let mutable numHops = 0
     let mutable predecessorCheck:bool = true
     let mutable boss = mailbox.Self
 
-    let routeNode(hash':bigint, id':bigint, predecessor':bigint, successor':bigint, fingerTable':List<bigint>, successorList':List<bigint>) = 
+    let routeNode(hash':bigint, id':bigint, predecessor':bigint, successor':bigint, fingerTable':List<bigint>, successors':List<bigint>) = 
         let mutable fingers = List<bigint>()
         for i in fingerTable' do
             fingers.Add(i) |> ignore
-        for i in successorList' do
+        for i in successors' do
             fingers.Add(i) |> ignore
         fingers.Sort()
         
@@ -75,63 +73,63 @@ let NodeActor (mailbox:Actor<_>) =
             boss <- mailbox.Sender()
 
         match message with
-        | Initialize(id', m', predecessor', successor', numRequests', successorList', fingerTable') -> 
+        | Initialize(id', predecessor', successor', m', numRequests', successors', fingerTable') -> 
             id <- id'
-            m <- m'
-            fingerTable <- fingerTable'
             predecessor <- predecessor'
             successor <- successor'
+            m <- m'
             numRequests <- numRequests'
-            successorList <- successorList'
+            successors <- successors'
+            fingerTable <- fingerTable'
         | NodeStart -> 
             // Generate random text from some random string
             let mutable randomText = ranStr 5
             let hash = abs(bigint(System.Text.Encoding.ASCII.GetBytes(randomText) |> HashAlgorithm.Create("SHA1").ComputeHash)) % bigint(Math.Pow(2.0, float(m)))
-            let destination = routeNode(hash, id, predecessor, successor, fingerTable, successorList)
-            nodeDict.Item(destination) <! Request(randomText, hash, id, 0)
+            let destination = routeNode(hash, id, predecessor, successor, fingerTable, successors)
+            nodeDict.Item(destination) <! Request(randomText, 0, hash, id)
             system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(1.), mailbox.Self, NodeStart) // send request once/second
-        | Update(id', m', numRequests') -> 
-            id <- id'
+        | Update(m', numRequests', id') -> 
             m <- m'
             numRequests <- numRequests'
-        | Request(message', hash', id', hops') -> 
-            let destination = routeNode(hash', id, predecessor, successor, fingerTable, successorList)
+            id <- id'
+        | Request(message', hops', hash', id') -> 
+            let destination = routeNode(hash', id, predecessor, successor, fingerTable, successors)
             let newHops = hops' + 1
             if destination = id then
                 nodeDict.Item(id') <! RequestRouted(newHops)
             else
-                nodeDict.Item(destination) <! Request(message', hash', id', newHops)
+                nodeDict.Item(destination) <! Request(message', newHops, hash', id')
         | RequestRouted(hops') ->
-            messagesReceived <- messagesReceived + 1
             numHops <- numHops + hops'
+            messagesReceived <- messagesReceived + 1
             if messagesReceived = numRequests then
                 boss <! Complete(numHops, id)
-        | Join(rNode) -> 
-            nodeDict.Item(rNode) <! GetSuccessor(id)
+        | Join(node) -> 
+            nodeDict.Item(node) <! GetSuccessor(id)
         | GetSuccessor(node) -> 
-            let destination = routeNode(node, id, predecessor, successor, fingerTable, successorList)
+            let destination = routeNode(node, id, predecessor, successor, fingerTable, successors)
             if destination = id && predecessor <> bigint(-1) then
-                nodeDict.Item(node) <! SuccessorCheck(id, predecessor, successorList)
+                nodeDict.Item(node) <! SuccessorCheck(id, predecessor, successors)
                 predecessor <- node
             else
                 nodeDict.Item(destination) <! GetSuccessor(node)
-        | SuccessorCheck(successor', predecessor', successorList') ->
-            successor <- successor'
-            predecessor <- predecessor'
+        | SuccessorCheck(successor', predecessor', successors') ->
             fingerTable.Add(successor')
-            successorList.Add(successor')
-            for i in successorList' do
-                successorList.Add(i)
-            successorList.Sort()
+            successors.Add(successor')
+            predecessor <- predecessor'
+            successor <- successor'
+            for i in successors' do
+                successors.Add(i)
+            successors.Sort()
             nodeDict.Item(id) <! NodeStart
         | CheckPredecessor ->
             if predecessor <> bigint(-1) then
-                if predecessorCheck then
+                if not predecessorCheck then
+                    predecessor <- bigint(-1)
+                else
                     nodeDict.Item(predecessor) <! SuccessorPredecessorCheck
                     predecessorCheck <- false
-                else
-                    predecessor <- bigint(-1)
-            system.Scheduler.ScheduleTellOnce(TimeSpan.FromMilliseconds(500.0), mailbox.Self, CheckPredecessor)
+            system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(0.5), mailbox.Self, CheckPredecessor)
         | SuccessorPredecessorCheck -> 
             nodeDict.Item(successor) <! PredecessorCheck
         | PredecessorCheck -> 
@@ -192,10 +190,10 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
             // Iterate through each item again from the total number of nodes we have
             // Gather all the information we will need to start a new node (Lists, Tables, Indexs, etc.)
             for i in 0..numNodes-1 do
-                // Now we assign values that will be used for the fingerTable and the successorList
+                // Now we assign values that will be used for the fingerTable and the successors
                 let mutable fingerTableSet = new HashSet<bigint>()
                 let mutable fingerTable = new List<bigint>()
-                let mutable successorList = new List<bigint>()
+                let mutable successors = new List<bigint>()
 
                 for j in 0..m-1 do 
                     // Get neighbor in chord
@@ -223,7 +221,7 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
                 // Create a list of all the successors based off the newly sorted node index and ID list
                 for m in 1..int((ceil(Math.Log(float(numNodes), 2.0)))) do
                     let successorIndex = (nodeIndexSortedList + m) % nodeIdList.Count
-                    successorList.Add(nodeIdList.Item(successorIndex))
+                    successors.Add(nodeIdList.Item(successorIndex))
                 
                 // Set the predecessor based on the node ID list and the location of the items in the node
                 let mutable predecessor = bigint(-1);
@@ -241,7 +239,7 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
                     successor <- nodeIdList.Item(0)
                 // Done setting all the values, lists, and indexes that each node will hold
                 // Initialize a node with the data that we currently have available
-                nodeDict.Item(nodeIdDict.Item(i + 1)) <! Initialize((nodeIdDict.Item(i+1)), m, predecessor, successor, requests, successorList, fingerTable)
+                nodeDict.Item(nodeIdDict.Item(i + 1)) <! Initialize((nodeIdDict.Item(i+1)), predecessor, successor, m, requests, successors, fingerTable)
             
             // Each node has been initialized, so start each one
             for i in 1..numNodes do
@@ -259,7 +257,7 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
                 nodeIdDict.Add(i, id)
 
                 // Once they are added to the Dict and IdDict we want to update that value
-                nodeDict.Item(nodeIdDict.Item(i)) <! Update((nodeIdDict.Item(i), m, requests))
+                nodeDict.Item(nodeIdDict.Item(i)) <! Update((m, requests, nodeIdDict.Item(i)))
             
             let mutable nodeIdListNew = new List<bigint>()
             for i in nodeIdDict.Values do
