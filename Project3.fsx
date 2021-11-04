@@ -41,8 +41,8 @@ let NodeActor (mailbox:Actor<_>) =
     let mutable successor = bigint(-1)
     let mutable successors = new List<bigint>()
     let mutable m = -1
-    let mutable numHops = 0
     let mutable predecessorCheck:bool = true
+    let mutable numHops = 0
     let mutable boss = mailbox.Self
 
     let routeNode(hash':bigint, id':bigint, predecessor':bigint, successor':bigint, fingerTable':List<bigint>, successors':List<bigint>) = 
@@ -53,18 +53,18 @@ let NodeActor (mailbox:Actor<_>) =
             fingers.Add(i) |> ignore
         fingers.Sort()
         
-        let mutable destination = id'
+        let mutable slot = id'
         if ((((hash' <= id') || (hash' > id' && (hash' > predecessor'))) && (predecessor' > id') || (((hash' > predecessor') && (hash' <= id')))) && (predecessor' < id')) && (predecessor' <> bigint(-1)) then
-            destination <- id'
+            slot <- id'
         else if hash' < fingers.Item(0) || hash' > fingers.Item(fingers.Count - 1) then
-            destination <- fingers.Item(fingers.Count - 1)
+            slot <- fingers.Item(fingers.Count - 1)
         else if (id' < successor' && (hash' > id' && hash' <= successor')) || (id' > successor' && ((hash' < id' && hash' <= successor') || hash' > id')) then
-            destination <- successor'
+            slot <- successor'
         else
             for i in 0..fingers.Count - 1 do
                 if hash' > fingers.Item(i) && hash' <= fingers.Item(i+1) then
-                    destination <- fingers.Item(i)
-        destination
+                    slot <- fingers.Item(i)
+        slot
 
     let rec loop () = actor {
         let! message = mailbox.Receive()
@@ -72,6 +72,8 @@ let NodeActor (mailbox:Actor<_>) =
             boss <- mailbox.Sender()
 
         match message with
+        | Join(node) -> 
+            nodeDict.Item(node) <! GetSuccessor(id)
         | Initialize(id', predecessor', successor', m', numRequests', successors', fingerTable') -> 
             id <- id'
             predecessor <- predecessor'
@@ -80,38 +82,36 @@ let NodeActor (mailbox:Actor<_>) =
             numRequests <- numRequests'
             successors <- successors'
             fingerTable <- fingerTable'
-        | NodeStart -> 
-            // Generate random text from some random string
-            let mutable randomText = ranStr 5
-            let hash = abs(bigint(System.Text.Encoding.ASCII.GetBytes(randomText) |> HashAlgorithm.Create("SHA1").ComputeHash)) % bigint(Math.Pow(2.0, float(m)))
-            let destination = routeNode(hash, id, predecessor, successor, fingerTable, successors)
-            nodeDict.Item(destination) <! Request(randomText, 0, hash, id)
-            system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(1.), mailbox.Self, NodeStart) // send request once/second
         | Update(m', numRequests', id') -> 
             m <- m'
             numRequests <- numRequests'
             id <- id'
+        | NodeStart -> 
+            // Generate random text from some random string
+            let mutable randomText = ranStr 5
+            let hash = abs(bigint(System.Text.Encoding.ASCII.GetBytes(randomText) |> HashAlgorithm.Create("SHA1").ComputeHash)) % bigint(Math.Pow(2.0, float(m)))
+            let slot = routeNode(hash, id, predecessor, successor, fingerTable, successors)
+            nodeDict.Item(slot) <! Request(randomText, 0, hash, id)
+            system.Scheduler.ScheduleTellOnce(TimeSpan.FromSeconds(1.), mailbox.Self, NodeStart) // send request once/second
         | Request(message', hops', hash', id') -> 
-            let destination = routeNode(hash', id, predecessor, successor, fingerTable, successors)
-            let newHops = hops' + 1
-            if destination = id then
-                nodeDict.Item(id') <! RequestRouted(newHops)
+            let slot = routeNode(hash', id, predecessor, successor, fingerTable, successors)
+            let hopsCounter = hops' + 1
+            if slot = id then
+                nodeDict.Item(id') <! RequestRouted(hopsCounter)
             else
-                nodeDict.Item(destination) <! Request(message', newHops, hash', id')
+                nodeDict.Item(slot) <! Request(message', hopsCounter, hash', id')
         | RequestRouted(hops') ->
             numHops <- numHops + hops'
             messagesReceived <- messagesReceived + 1
             if messagesReceived = numRequests then
                 boss <! Complete(numHops, id)
-        | Join(node) -> 
-            nodeDict.Item(node) <! GetSuccessor(id)
         | GetSuccessor(node) -> 
-            let destination = routeNode(node, id, predecessor, successor, fingerTable, successors)
-            if destination = id && predecessor <> bigint(-1) then
+            let slot = routeNode(node, id, predecessor, successor, fingerTable, successors)
+            if slot = id && predecessor <> bigint(-1) then
                 nodeDict.Item(node) <! SuccessorCheck(id, predecessor, successors)
                 predecessor <- node
             else
-                nodeDict.Item(destination) <! GetSuccessor(node)
+                nodeDict.Item(slot) <! GetSuccessor(node)
         | SuccessorCheck(successor', predecessor', successors') ->
             fingerTable.Add(successor')
             successors.Add(successor')
