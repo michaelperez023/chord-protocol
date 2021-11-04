@@ -265,11 +265,10 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
                 let mutable rNode = nodeIdListNew.Item(r.Next(nodeIdList.Count - 1))
                 nodeDict.Item(nodeIdDict.Item(i)) <! Join(rNode)
         | Complete(hops, node) -> // Node completion check
-            completedNodes <- completedNodes + 1 // Increment completed nodes
-
             // Print node that just finished if number of completed nodes is less than total 
             printfn "Node %A completed after %d hops. %d nodes have completed." node hops completedNodes
             totalHops <- totalHops + hops
+            completedNodes <- completedNodes + 1 // Increment completed nodes
 
             // Exit program if number of completed nodes is equal to number of nodes
             if completedNodes = numNodes then
