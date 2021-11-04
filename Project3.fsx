@@ -67,7 +67,6 @@ let NodeActor (mailbox:Actor<_>) =
         destination
 
     let rec loop () = actor {
-        mailbox.Context.SetReceiveTimeout(TimeSpan.FromSeconds 1000.0)
         let! message = mailbox.Receive()
         if boss = mailbox.Self then
             boss <- mailbox.Sender()
@@ -191,10 +190,9 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
             // Gather all the information we will need to start a new node (Lists, Tables, Indexs, etc.)
             for i in 0..numNodes-1 do
                 // Now we assign values that will be used for the fingerTable and the successors
-                let mutable fingerTableSet = new HashSet<bigint>()
+                let mutable fingerTableSet = new List<bigint>()
                 let mutable fingerTable = new List<bigint>()
                 let mutable successors = new List<bigint>()
-
                 for j in 0..m-1 do 
                     // Get neighbor in chord
                     let neighbor = nodeIdDict.Item(i+1) + bigint(int(Math.Pow(2.0, float(j)))) % bigint(Math.Pow(2.0, float(m)))
@@ -206,7 +204,7 @@ let BossActor numNodesInput numRequests (mailbox:Actor<_>) =
                             fingerTableSet.Add(nodeIdList.Item(k)) |> ignore
                             biggerFound <- true
                     
-                    // This seems to re-arrange the neighbors to be properly ordered
+                    // This re-arranges the neighbors
                     if neighbor > nodeIdList.Item(nodeIdList.Count - 1) then
                         fingerTableSet.Add(nodeIdList.Item(0)) |> ignore
                 
@@ -290,7 +288,7 @@ match fsi.CommandLineArgs.Length with
     let numNodes = fsi.CommandLineArgs.[1] |> int
     let numRequests = fsi.CommandLineArgs.[2] |> int
 
-    // Go ahead and spawn the boss node with the number of nodes and requests we set
+    // Spawn the boss node with the inputted number of nodes and requests
     let bossNode = spawn system "boss" (BossActor numNodes numRequests)
     
     // Start the boss node with the actor message BossStart
