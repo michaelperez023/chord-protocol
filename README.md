@@ -90,6 +90,10 @@ Machine: Ubuntu 24.04 desktop with an AMD Ryzen Threadripper 1920X (12 cores, 24
 
 20,000 peers need several cores. With the seed-1 run limited to 4 CPUs (`taskset -c 0-3`), the ring took 116 s to stabilize and the lookups took 31 s; with 2 CPUs, they took 590 s and 202 s. The hop counts were the same.
 
+## Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on GitHub Actions with .NET 10 on Ubuntu. It runs the program with `--verify` on rings of 1, 2 and 10 peers (2 requests per peer) and of 300 peers (3 requests per peer), and fails if any lookup does not end at the successor of its key.
+
 ## Course
 
 COP 5615 Distributed Operating System Principles, University of Florida, Fall 2021, taught by Dr. Alin Dobra (Project 3, submitted November 3, 2021). The assignment was to implement the network join and routing from the Chord paper in F# with the actor model, one actor per peer, and a simple application that associates keys with strings. Each peer makes `numRequests` requests, one per second, and the program prints the average number of hops per request.
