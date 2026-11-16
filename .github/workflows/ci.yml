@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Small rings (1, 2 and 10 peers)
+        run: |
+          for n in 1 2 10; do
+            timeout 300 dotnet fsi Chord.fsx "$n" 2 --verify
+          done
+
+      - name: 300 peers, 3 lookups each
+        run: timeout 600 dotnet fsi Chord.fsx 300 3 --verify

@@ -1,0 +1,14 @@
+# Build output (if the script is ever moved into a project)
+bin/
+obj/
+
+# Editor and OS files
+.ionide/
+.vs/
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Logs from local runs
+*.log
