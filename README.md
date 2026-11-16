@@ -2,7 +2,7 @@
 
 An implementation of the Chord peer-to-peer lookup protocol ([Stoica et al., SIGCOMM 2001](https://pdos.csail.mit.edu/papers/chord:sigcomm01/chord_sigcomm.pdf)) in a single F# script, with one Akka.NET actor per peer. A boss actor builds most of the ring directly; the remaining tenth of the peers join with Chord's join, stabilize, notify and fix_fingers procedures, and the program checks every routing entry before the lookups start. Then every peer looks up random keys, and the program prints the average number of hops per lookup.
 
-Michael Perez and Blas Kojusner wrote it in 2021 for a course project (see [Course](#course)). It was revised in 2026: the routing, finger tables and joins now work as described in the paper, and the script runs on .NET 10. See [Changes since the 2021 submission](#changes-since-the-2021-submission).
+Michael Perez and Blas Kojusner wrote it in 2021 for a course project (see [Course](#course)). It was revised in 2026 and runs on .NET 10.
 
 ## Chord in brief
 
@@ -89,17 +89,6 @@ A hop is one message from one peer to the next. A lookup that the requesting pee
 Machine: Ubuntu 24.04 desktop with an AMD Ryzen Threadripper 1920X (12 cores, 24 threads) and 31 GiB of RAM, .NET SDK 10.0.404, Akka.FSharp 1.5.74. The load average was 3 to 11 when the runs started. With all 24 threads, the three 20,000-peer runs took 26 to 30 s from start to exit, including 13 to 16 s for the ring to stabilize after the joins.
 
 20,000 peers need several cores. With the seed-1 run limited to 4 CPUs (`taskset -c 0-3`), the ring took 116 s to stabilize and the lookups took 31 s; with 2 CPUs, they took 590 s and 202 s. The hop counts were the same.
-
-## Changes since the 2021 submission
-
-- **Routing.** The test for "this peer owns the key" had misplaced parentheses and could never be true for keys in the arc that wraps past zero. The finger check also ran before the successor check, so a request that had reached the key's predecessor was often sent on to the farthest finger. Many lookups circled the ring forever. The routing now first checks whether the peer owns the key itself (as an earlier version of the code did), then, as in the paper's find_successor, whether the key lies between the peer and its successor, and otherwise forwards to the closest preceding finger or successor-list entry.
-- **Finger tables.** Finger targets went through `int(Math.Pow(2.0, float j))`, which overflows for j ≥ 31 (runs with more than 1,024 initial peers), and the sum was not reduced mod 2^m. They are now computed as (n + 2^i) mod 2^m with `bigint`.
-- **Joins.** The stabilize, notify and fix_fingers code had been removed before the submission, so the other peers never updated their successor pointers or finger tables for a joining peer. It is restored from the earlier version and corrected to follow the paper. New peers join only through peers that are already in the ring. The old code could pick a peer that was not set up yet, which caused the "Index was out of range" error quoted in the old README.
-- **Lookups and the average.** Peers now stop after `numRequests` lookups, and the average is taken over every lookup. Before, peers kept sending requests, each peer reported only its first `numRequests` replies (lookups stuck in a loop never replied), and the sum was divided by a count that did not match.
-- **Actors.** The peers no longer share a mutable dictionary. Peer references are passed in messages.
-- **Runtime.** The script uses `SHA1.HashData` instead of the obsolete `HashAlgorithm.Create("SHA1")`, pins Akka.FSharp to 1.5.74 and runs on .NET 10. It was renamed from `Project3.fsx` to `Chord.fsx`.
-- **Checks.** New `--verify` and `--seed` options, and a GitHub Actions workflow that runs `--verify` on rings of 1, 2, 10 and 300 peers.
-- **Reported result.** The 2021 README gave an average of 49.25 hops for 20,000 nodes. That number came from the faulty routing and finger tables, not from a working Chord ring. The fixed code averages 7.10 hops at 20,000 peers.
 
 ## Course
 
